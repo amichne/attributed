@@ -19,7 +19,6 @@ import (
 	"github.com/amichne/attributed"
 	"github.com/amichne/attributed/internal/gitcmd"
 	"github.com/amichne/attributed/internal/model"
-	"github.com/amichne/attributed/internal/runner"
 	"github.com/amichne/attributed/internal/version"
 )
 
@@ -89,11 +88,9 @@ func commands() []*command {
 		{
 			name:  "blame",
 			short: "show line-level attribution",
-			usage: "Usage: git-attributed blame [--json] [--tokens] [--color=auto|always|never] <file>\n\n" +
+			usage: "Usage: git-attributed blame [--json] [--color=auto|always|never] <file>\n\n" +
 				"Show human, AI, human-override, or untracked attribution for every line at HEAD.\n" +
 				"Human lines carry the identity of the commit author that introduced them.\n" +
-				"--tokens appends session token usage to AI lines, such as [120i/34o],\n" +
-				"with cache counts only when nonzero.\n" +
 				"The file argument resolves against the working directory first, then\n" +
 				"the repository root.",
 			run: runBlame,
@@ -106,45 +103,12 @@ func commands() []*command {
 			run: runStatus,
 		},
 		{
-			name:  "dashboard",
-			short: "generate a local HTML attribution report",
-			usage: "Usage: git-attributed dashboard [--range <rev-range>] [--repo] [--output FILE] [file]\n\n" +
-				"Generate a self-contained HTML report for one file or every\n" +
-				"file attributed on HEAD. Use --range or --repo for a bounded\n" +
-				"repository report without source lines. Existing output files\n" +
-				"are not replaced. The file argument resolves against the\n" +
-				"working directory first, then the repository root.",
-			run: runDashboard,
-		},
-		{
-			name:  "stats",
-			short: "aggregate attribution statistics",
-			usage: "Usage: git-attributed stats [<rev-range>] [--json]\n\n" +
-				"Show attribution totals and deterministic breakdowns without reading blobs.",
-			run: runStats,
-		},
-		{
 			name:  "verify",
 			short: "verify attribution notes",
 			usage: "Usage: git-attributed verify [<rev-range>] [--deep] [--json]\n\n" +
 				"Check attribution notes, blob identity, and range coverage.\n" +
 				"--deep reads blobs to verify exact line counts.",
 			run: runVerify,
-		},
-		{
-			name:  "check",
-			short: "check attribution policy limits",
-			usage: "Usage: git-attributed check [<rev-range>] [--max-ai-percent N] [--max-untracked-percent N] [--require-note] [--json]\n\n" +
-				"Evaluate attribution policy flags. A policy violation exits 1.",
-			run: runCheck,
-		},
-		{
-			name:  "disclosure",
-			short: "write machine-readable AI disclosure input",
-			usage: "Usage: git-attributed disclosure [--range <rev-range>] [--format json|spdx|cyclonedx] [--output FILE]\n\n" +
-				"Write private, deterministic disclosure input to stdout or --output FILE.\n" +
-				"The output is not a compliance certificate and existing files are not replaced.",
-			run: runDisclosure,
 		},
 		{
 			name:  "rewrite",
@@ -169,15 +133,6 @@ func commands() []*command {
 			run: runMergeNotes,
 		},
 		{
-			name:  "ci",
-			short: "reconstruct attribution after forge merges",
-			usage: "Usage: git-attributed ci install --provider github|gitlab\n" +
-				"       git-attributed ci run --provider github|gitlab [--base REV --source REV --target REV --mode auto|squash|rebase]\n\n" +
-				"Install a forge workflow or reconstruct attribution locally after\n" +
-				"a squash or rebase merge. The binary never pushes notes.",
-			run: runCI,
-		},
-		{
 			name:  "export",
 			short: "export attribution to an interop format",
 			usage: "Usage: git-attributed export --format gitai|agent-trace [--commit REV] [--output FILE]\n\n" +
@@ -197,9 +152,6 @@ func commands() []*command {
 			usage: "Usage: git-attributed install-hooks [--agent droid|claude|all|none] [--git] [--local-notes] [--user|--project] [--template]\n\n" +
 				"Merge managed hooks without replacing existing configuration.\n" +
 				"Git hooks share attribution notes on push unless --local-notes is set.\n" +
-				"When shared-note Git hooks are installed, the forge attribution\n" +
-				"workflow is also created when the origin remote is github.com or\n" +
-				"gitlab.com, so squash and rebase merges keep their attribution.\n" +
 				"--template manages Git hooks in the git-attributed Git template\n" +
 				"directory, so every new git init and git clone is attributed.",
 			run: runInstallHooks,
@@ -208,25 +160,8 @@ func commands() []*command {
 			name:  "uninstall",
 			short: "remove managed hooks",
 			usage: "Usage: git-attributed uninstall [--agent droid|claude|all|none] [--git] [--user|--project] [--template]\n\n" +
-				"Remove only configuration managed by git-attributed, including a\n" +
-				"forge attribution workflow that still matches the generated\n" +
-				"template.",
+				"Remove only configuration managed by git-attributed.",
 			run: runUninstall,
-		},
-		{
-			name:  "update",
-			short: "download the latest verified release and swap it in",
-			usage: "Usage: git-attributed update [--version vX.Y.Z] [--dry-run] [--no-hooks]\n" +
-				"                         [--archive FILE --checksums FILE]\n\n" +
-				"Update the running binary and refresh managed hooks. With no\n" +
-				"flags, the latest release is downloaded from the pinned GitHub\n" +
-				"repository over HTTPS, verified against its checksums.txt, and\n" +
-				"swapped in; this fetch is the command's only network access.\n" +
-				"--version pins a specific release tag. --archive and --checksums\n" +
-				"update from files you fetched yourself, with no network access at\n" +
-				"all. --no-hooks skips the hook refresh. After the swap, run\n" +
-				"'git-attributed version' to confirm the new version.",
-			run: runUpdate,
 		},
 		{
 			name:  "license",
@@ -246,14 +181,11 @@ func commands() []*command {
 		{
 			name:  "version",
 			short: "show the git-attributed version",
-			usage: "Usage: git-attributed version [--json] [--check]\n\n" +
+			usage: "Usage: git-attributed version [--json]\n\n" +
 				"Print the git-attributed version and exit. Release builds report the\n" +
 				"release tag; local builds report dev. --json prints the version,\n" +
 				"the highest supported attribution note version, and the state\n" +
-				"format version. --check asks the GitHub release page for the\n" +
-				"newest release and prints the update command when it is newer\n" +
-				"than the running one. It is one of the two commands that touch\n" +
-				"the network, and it only reads.",
+				"format version.",
 			run: runVersion,
 		},
 	}
@@ -383,9 +315,7 @@ type versionJSON struct {
 // runVersion implements the version command. The default output is one
 // stable line; --json adds the highest supported attribution note and
 // state format versions for tooling that checks format compatibility
-// before updating. --check additionally resolves the newest release
-// tag from the GitHub release page and prints the update command when a
-// newer release exists.
+// before updating.
 func runVersion(env *Env, c *command, args []string) (int, error) {
 	fs := flag.NewFlagSet("git-attributed "+c.name, flag.ContinueOnError)
 	var flagOutput strings.Builder
@@ -394,7 +324,6 @@ func runVersion(env *Env, c *command, args []string) (int, error) {
 		fmt.Fprintln(&flagOutput, c.usage)
 	}
 	asJSON := fs.Bool("json", false, "print one machine-readable JSON object")
-	check := fs.Bool("check", false, "compare against the latest GitHub release")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(env.Stdout, c.usage)
@@ -405,9 +334,6 @@ func runVersion(env *Env, c *command, args []string) (int, error) {
 	}
 	if fs.NArg() > 0 {
 		return commandUsageError(env, c, fmt.Errorf("version takes no arguments, got %q", fs.Arg(0)))
-	}
-	if *asJSON && *check {
-		return commandUsageError(env, c, errors.New("--check cannot be combined with --json"))
 	}
 	if *asJSON {
 		data, err := json.Marshal(versionJSON{
@@ -422,27 +348,5 @@ func runVersion(env *Env, c *command, args []string) (int, error) {
 		return ExitSuccess, nil
 	}
 	fmt.Fprintf(env.Stdout, "git-attributed %s\n", version.Version)
-	if !*check {
-		return ExitSuccess, nil
-	}
-	rn, err := runner.New("")
-	if err != nil {
-		return operationalError(env, c.name, err)
-	}
-	tag, err := rn.LatestTag(updateRepository)
-	if err != nil {
-		return operationalError(env, c.name, err)
-	}
-	if version.IsRelease() {
-		switch version.CompareReleaseTags(version.Version, tag) {
-		case 0:
-			fmt.Fprintf(env.Stdout, "git-attributed %s is up to date with the latest release.\n", version.Version)
-			return ExitSuccess, nil
-		case 1:
-			fmt.Fprintf(env.Stdout, "git-attributed %s is newer than the latest release %s.\n", version.Version, tag)
-			return ExitSuccess, nil
-		}
-	}
-	fmt.Fprintf(env.Stdout, "New release %s is available. Run 'git-attributed update' to install it.\n", tag)
 	return ExitSuccess, nil
 }

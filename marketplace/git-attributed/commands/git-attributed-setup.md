@@ -1,36 +1,29 @@
 ---
-description: Install git-attributed and activate attribution hooks
+description: Activate git-attributed attribution hooks
 ---
 
-Install git-attributed for the current operating system without asking the user to
-install a binary manually.
+Activate git-attributed attribution hooks for the current project. Attributed
+has no release yet, so this command does not download a binary. Find
+`git-attributed` on `PATH`.
 
 On Linux or macOS, run:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/amichne/attributed/main/install.sh |
-  bash -s -- --no-git-hook
-binary="$HOME/.local/bin/git-attributed"
+binary="$(command -v git-attributed)" || { echo "git-attributed is not on PATH" >&2; exit 1; }
 ```
 
 On Windows PowerShell, run:
 
 ```powershell
-$installer = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ps1")
-try {
-    irm https://raw.githubusercontent.com/amichne/attributed/main/install.ps1 -OutFile $installer
-    & $installer -NoGitHook
-}
-finally {
-    Remove-Item $installer -Force -ErrorAction SilentlyContinue
-}
-$binary = Join-Path $HOME "bin/git-attributed.exe"
+$binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-Run the remaining commands through the absolute `$binary` path so setup does
-not depend on the current agent process reloading `PATH`. Verify
-`$binary version`.
+If it is missing, stop. Tell the user to build it from an Attributed checkout
+with Go 1.24 or later, as in
+`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
+and then rerun this command. Run the remaining commands through the absolute
+`$binary` path so setup does not depend on the current agent process reloading
+`PATH`. Verify `$binary version`.
 
 This plugin is installed by both Factory and Claude Code, so pick the agent
 you are running:
@@ -39,7 +32,7 @@ you are running:
 - Claude Code: `--agent claude`, and its project hook file is
   `.claude/settings.json`
 
-If that project hook file already contains `promptscript-generated`, keep it
+If that project hook file already contains `git-attributed-hook`, keep it
 and install only the Git hooks:
 
 ```sh

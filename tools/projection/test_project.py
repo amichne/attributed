@@ -220,7 +220,7 @@ def test_projection_matches_the_committed_tree(sources: Path) -> None:
 @requires_pkl
 def test_projection_seals_the_opencode_plugin_digest(sources: Path) -> None:
     tree = subject.project(sources, "pkl")
-    plugin = tree["marketplace/harness/opencode/promptscript.ts"]
+    plugin = tree["marketplace/harness/opencode/git-attributed.ts"]
     setup = tree["marketplace/harness/opencode/git-attributed-setup.md"].decode()
     assert setup.count(hashlib.sha256(plugin).hexdigest()) == 2
     assert subject.ZERO_DIGEST not in setup

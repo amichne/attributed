@@ -1,36 +1,31 @@
 # git-attributed setup
 
-Install git-attributed for the current operating system and activate
-attribution hooks. Never use `sudo`.
+Activate git-attributed attribution hooks for the current project. Never use
+`sudo`.
 
-**1. Install the verified binary.**
+**1. Find the binary.**
+
+Attributed has no release yet, so this command does not download a binary.
+Find `git-attributed` on `PATH`.
 
 Linux or macOS:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/amichne/attributed/main/install.sh |
-  bash -s -- --no-git-hook
-binary="$HOME/.local/bin/git-attributed"
+binary="$(command -v git-attributed)" || { echo "git-attributed is not on PATH" >&2; exit 1; }
 ```
 
 Windows PowerShell:
 
 ```powershell
-$installer = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ps1")
-try {
-    irm https://raw.githubusercontent.com/amichne/attributed/main/install.ps1 -OutFile $installer
-    & $installer -NoGitHook
-}
-finally {
-    Remove-Item $installer -Force -ErrorAction SilentlyContinue
-}
-$binary = Join-Path $HOME "bin/git-attributed.exe"
+$binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-The installer verifies the release archive checksum and the binary version.
-Run the remaining commands through the absolute `$binary` path, so setup does
-not depend on this process reloading `PATH`. Verify `$binary version`.
+If it is missing, stop. Tell the user to build it from an Attributed checkout
+with Go 1.24 or later, as in
+`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
+and then rerun this command. Run the remaining commands through the absolute
+`$binary` path, so setup does not depend on this process reloading `PATH`.
+Verify `$binary version`.
 
 **2. Install the Git hooks.**
 
@@ -48,11 +43,11 @@ attribution without automatic note sharing.
 **3. Install the agent hook for this agent.**
 
 Copy `marketplace/harness/grok/hooks.json` from the git-attributed repository into
-`.grok/hooks/promptscript.json` of the user's project, creating parent directories as needed:
+`.grok/hooks/git-attributed.json` of the user's project, creating parent directories as needed:
 
 ```sh
 curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o .grok/hooks/promptscript.json --create-dirs \
+  -o .grok/hooks/git-attributed.json --create-dirs \
   https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/grok/hooks.json
 ```
 

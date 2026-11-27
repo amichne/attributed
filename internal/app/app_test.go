@@ -89,58 +89,10 @@ var runCases = []runCase{
 		stdout: `{"version":"dev","note_version":4,"state_version":3}` + "\n", noStderr: true,
 	},
 	{
-		name:   "help update prints the update usage",
-		args:   []string{"help", "update"},
-		code:   ExitSuccess,
-		stdout: "Usage: git-attributed update", noStderr: true,
-	},
-	{
-		name:   "update with only --archive exits 2",
-		args:   []string{"update", "--archive", "a.tar.gz"},
+		name:   "version --check is no longer a flag",
+		args:   []string{"version", "--check"},
 		code:   ExitUsage,
-		stderr: "--archive and --checksums are required together", noStdout: true,
-	},
-	{
-		name:   "update with only --checksums exits 2",
-		args:   []string{"update", "--checksums", "c.txt"},
-		code:   ExitUsage,
-		stderr: "--archive and --checksums are required together", noStdout: true,
-	},
-	{
-		name:   "update with --version and --archive exits 2",
-		args:   []string{"update", "--version", "v1.2.0", "--archive", "a.tar.gz", "--checksums", "c.txt"},
-		code:   ExitUsage,
-		stderr: "--version cannot be combined with --archive and --checksums", noStdout: true,
-	},
-	{
-		name:   "update with an invalid --version exits 2",
-		args:   []string{"update", "--version", "1.2.0"},
-		code:   ExitUsage,
-		stderr: "unsupported release version: 1.2.0", noStdout: true,
-	},
-	{
-		name:   "version with --json and --check exits 2",
-		args:   []string{"version", "--json", "--check"},
-		code:   ExitUsage,
-		stderr: "--check cannot be combined with --json", noStdout: true,
-	},
-	{
-		name:   "update with an unsupported archive exits 2",
-		args:   []string{"update", "--archive", "release.tar.xz", "--checksums", "checksums.txt"},
-		code:   ExitUsage,
-		stderr: "unsupported archive", noStdout: true,
-	},
-	{
-		name:   "update with a positional argument exits 2",
-		args:   []string{"update", "--archive", "a.tar.gz", "--checksums", "c.txt", "extra"},
-		code:   ExitUsage,
-		stderr: "update takes no positional arguments", noStdout: true,
-	},
-	{
-		name:   "update help flag prints usage on stdout and exits 0",
-		args:   []string{"update", "-h"},
-		code:   ExitSuccess,
-		stdout: "Usage: git-attributed update", noStderr: true,
+		stderr: "flag provided but not defined: -check", noStdout: true,
 	},
 	{
 		name:   "license prints the upstream MIT notice and exits 0",
@@ -230,6 +182,25 @@ func TestRunVersionInjected(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want it empty", stderr.String())
+	}
+}
+
+// TestRemovedCommandsAreUnknown records the commands that Attributed
+// removed from the upstream CLI: reports, dashboards, disclosure, forge
+// workflows, and self-update. Each must now fail dispatch as unknown.
+func TestRemovedCommandsAreUnknown(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"dashboard", "stats", "check", "disclosure", "ci", "update"} {
+		var stdout, stderr bytes.Buffer
+		env := &Env{Stdin: &bytes.Buffer{}, Stdout: &stdout, Stderr: &stderr}
+		code, err := Run([]string{name}, env)
+		if code != ExitUsage || err == nil || stdout.Len() != 0 ||
+			!bytes.Contains(stderr.Bytes(), []byte(fmt.Sprintf("unknown command %q", name))) {
+			t.Errorf("Run(%q) = %d, %v, stdout %q, stderr %q; want unknown command", name, code, err, stdout.String(), stderr.String())
+		}
+		if bytes.Contains([]byte(rootUsage()), []byte("  "+name+" ")) {
+			t.Errorf("root usage still lists %q", name)
+		}
 	}
 }
 

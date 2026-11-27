@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/amichne/attributed/internal/engine"
 	"github.com/amichne/attributed/internal/gitcmd"
@@ -364,4 +365,36 @@ func writeVerifyText(env *Env, result verifyResult) {
 	}
 	fmt.Fprintf(env.Stdout, "verified %d annotated commits (%d commits total), %d issue(s)\n",
 		result.Commits.Annotated, result.Commits.Total, len(result.Issues))
+}
+
+// parseRevisionRange splits an optional two-dot revision range argument.
+// A single revision selects history up to it; no argument selects HEAD.
+func parseRevisionRange(args []string, commandName string) (string, string, error) {
+	if len(args) == 0 {
+		return "", "", nil
+	}
+	if len(args) > 1 {
+		return "", "", fmt.Errorf("%s accepts at most one revision range", commandName)
+	}
+	value := args[0]
+	if value == "" {
+		return "", "", errors.New("revision range must not be empty")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return "", "", errors.New("revision range contains whitespace or a control character")
+		}
+	}
+	if strings.Contains(value, "...") {
+		return "", "", errors.New("revision range must use two dots, not three")
+	}
+	index := strings.Index(value, "..")
+	if index < 0 {
+		return "", value, nil
+	}
+	from, to := value[:index], value[index+2:]
+	if from == "" || to == "" || strings.Contains(to, "..") {
+		return "", "", fmt.Errorf("invalid revision range %q", value)
+	}
+	return from, to, nil
 }

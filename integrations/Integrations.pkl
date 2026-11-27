@@ -67,7 +67,7 @@ assets {
   "marketplace/harness/cursor/git-attributed-setup.md"
   "marketplace/harness/grok/git-attributed-setup.md"
   "marketplace/harness/opencode/git-attributed-setup.md"
-  "marketplace/harness/opencode/promptscript.ts"
+  "marketplace/harness/opencode/git-attributed.ts"
   "marketplace/harness/vscode/git-attributed-setup.prompt.md"
   "marketplace/harness/windsurf/git-attributed-setup.md"
 }
