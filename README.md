@@ -57,6 +57,8 @@ go test ./...
 go build -o git-attributed ./cmd/git-attributed && ATTRIBUTED_BIN=./git-attributed bash scripts/smoke.sh
 ```
 
+Pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`). [release-please](https://github.com/googleapis/release-please) reads them on `main` to keep a release pull request with the next version and `CHANGELOG.md`; merging it publishes the release, and GoReleaser builds the archives and updates the Homebrew cask. `bash scripts/cask-smoke.sh` installs that cask from a local mirror.
+
 `marketplace/` and `commands/` are generated from `integrations/`. Edit the source, then regenerate as the [projection guide](docs/extraction.mdx#project-harness-integrations) describes. `vhs docs/assets/blame.tape` re-records the demo.
 
 ## License

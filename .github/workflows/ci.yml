@@ -68,11 +68,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
       - uses: ./.github/actions/toolchain
 
       - name: Ruff
@@ -88,12 +83,61 @@ jobs:
       - name: Pytest
         working-directory: tools
         run: |
-          for suite in projection publish release toolchain; do
+          for suite in projection publish toolchain; do
             (cd "$suite" && uv run --no-project --with pytest==8.4.2 python -m pytest -q -p no:cacheprovider .)
           done
 
       - name: Projected integrations match their source
         run: uv run --locked --script tools/projection/project.py check
+
+  cask:
+    name: Homebrew cask on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.20.3
+          install-only: true
+
+      - name: Put Homebrew on PATH
+        if: runner.os == 'Linux'
+        run: echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+
+      - name: Install the cask from a local mirror
+        run: bash scripts/cask-smoke.sh
+
+  pr-title:
+    name: Conventional pull request title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the title release-please will read
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [^ ].*'
+          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::Use a Conventional Commit title, such as 'feat: add signed notes' or 'fix(hooks): keep the bin/ link'. Squash merges use it as the commit release-please reads."
+            exit 1
+          fi
 
   docs:
     name: Documentation

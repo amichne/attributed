@@ -1,9 +1,8 @@
 {
-  "include": ["projection", "publish", "release", "toolchain"],
+  "include": ["projection", "publish", "toolchain"],
   "executionEnvironments": [
     { "root": "projection", "extraPaths": ["projection"] },
     { "root": "publish", "extraPaths": ["publish"] },
-    { "root": "release", "extraPaths": ["release"] },
     { "root": "toolchain", "extraPaths": ["toolchain"] }
   ],
   "pythonVersion": "3.12",

@@ -27,7 +27,7 @@ Git runs the binary as `git attributed`.
 
 ### Install through a Homebrew mirror
 
-The formula downloads one file: the release archive for your platform, pinned by SHA-256. It needs no toolchain and has no dependencies. To install without reaching GitHub, mirror two things:
+The tap ships a cask that downloads one file: the release archive for your platform, pinned by SHA-256. It needs no toolchain and has no dependencies. To install without reaching GitHub, mirror two things:
 
 | Mirror | Of |
 | --- | --- |
@@ -42,7 +42,7 @@ export HOMEBREW_GIT_ATTRIBUTED_URL_ROOT=https://artifacts.example.internal/githu
 brew install amichne/tap/git-attributed
 ```
 
-Replace the example hosts with your own. With the variable set, Homebrew fetches `<root>/v0.1.0/git-attributed_v0.1.0_darwin_arm64.tar.gz` and never falls back to GitHub; the checksum in the formula still has to match. `HOMEBREW_ARTIFACT_DOMAIN` does not cover this formula, because Homebrew rewrites only bottle downloads with it.
+Replace the example hosts with your own. With the variable set, Homebrew fetches `<root>/v0.1.0/git-attributed_v0.1.0_darwin_arm64.tar.gz` and never falls back to GitHub; the checksum in the cask still has to match. `HOMEBREW_ARTIFACT_DOMAIN` does not cover this cask, because Homebrew rewrites only bottle downloads with it.
 
 Each archive includes `LICENSE` and `LICENSE.upstream`. Every release publishes `checksums.txt` and a build provenance attestation that `gh attestation verify <archive> --repo amichne/attributed` checks.
 
