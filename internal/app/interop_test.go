@@ -73,6 +73,40 @@ func TestImportCommand(t *testing.T) {
 	}
 }
 
+// TestImportBylineCommandMakesUpstreamNotesBlameable imports a note that
+// the pinned upstream git-byline binary wrote, then reads it through blame.
+func TestImportBylineCommandMakesUpstreamNotesBlameable(t *testing.T) {
+	t.Parallel()
+	root := appRepo(t)
+	appWrite(t, root, "app.txt", "human base\nai alpha\nai beta\n")
+	appCommit(t, root, "ai lines")
+	head := strings.TrimSpace(appGit(t, root, "rev-parse", "HEAD"))
+	repo, err := gitcmd.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(filepath.Join("..", "interop", "testdata", "git-byline-note.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WriteNoteRef("refs/notes/byline", head, fixture); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr, err := appRun(root, zeroAppTime(), nil, "import", "--format", "byline", "--dry-run")
+	if code != ExitSuccess || err != nil || stdout != "would import 1 git-byline notes\n" || stderr != "" {
+		t.Fatalf("dry import = %d, %q, %q, %v", code, stdout, stderr, err)
+	}
+	code, stdout, stderr, err = appRun(root, zeroAppTime(), nil, "import", "--format", "byline", "--range", "HEAD")
+	if code != ExitSuccess || err != nil || stdout != "imported 1 git-byline notes\n" || stderr != "" {
+		t.Fatalf("import = %d, %q, %q, %v", code, stdout, stderr, err)
+	}
+	code, stdout, stderr, err = appRun(root, zeroAppTime(), nil, "blame", "--color=never", "app.txt")
+	if code != ExitSuccess || err != nil || stderr != "" ||
+		!strings.Contains(stdout, "human:fixture") || strings.Count(stdout, "ai:claude/fixture-model") != 2 {
+		t.Fatalf("blame = %d, %q, %q, %v", code, stdout, stderr, err)
+	}
+}
+
 func TestImportCommandWarnsAndSucceedsForDifferentNote(t *testing.T) {
 	t.Parallel()
 	root := appRepo(t)

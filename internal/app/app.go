@@ -141,9 +141,13 @@ func commands() []*command {
 		},
 		{
 			name:  "import",
-			short: "import Git AI attribution notes",
-			usage: "Usage: git-attributed import --format gitai [--range REV-RANGE] [--dry-run]\n\n" +
-				"Import Git AI notes without replacing different attributed notes.",
+			short: "import Git AI or git-byline attribution notes",
+			usage: "Usage: git-attributed import --format gitai|byline [--range REV-RANGE] [--dry-run]\n\n" +
+				"Import Git AI notes from refs/notes/ai, or git-byline notes from\n" +
+				"refs/notes/byline, into refs/notes/attributed. git-byline notes are\n" +
+				"copied unchanged after they match their commit. A different existing\n" +
+				"attributed note is never replaced. Without --range, only HEAD is\n" +
+				"imported; --range HEAD imports its whole history.",
 			run: runImport,
 		},
 		{
