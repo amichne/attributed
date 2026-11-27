@@ -1,0 +1,9 @@
+{
+  "include": ["projection", "upstream-import"],
+  "executionEnvironments": [
+    { "root": "projection", "extraPaths": ["projection"] },
+    { "root": "upstream-import", "extraPaths": ["upstream-import"] }
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict"
+}

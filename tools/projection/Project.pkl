@@ -1,0 +1,59 @@
+/// Turns `integrations/Integrations.pkl` and its assets into a complete
+/// file plan. The driver supplies each sealed digest as the property
+/// `sha256.<path>`. Without it, a seal renders as 64 zeros.
+module Project
+
+import "../../integrations/Integrations.pkl"
+
+/// One projected file at a repository-relative path.
+class File {
+  path: String(matches(Regex(#"(marketplace|commands)/[A-Za-z0-9._/-]+"#)))
+  text: String
+  /// Paths whose digests this file embeds.
+  seals: Listing<String>(isDistinct)
+}
+
+local json = new JsonRenderer {}
+local sealToken = Regex(#"@@sha256:([A-Za-z0-9._/-]+)@@"#)
+local zeroDigest = "0".repeat(64)
+local assetRoot = "../../integrations/assets/"
+
+local function document(target: String, value: Dynamic): File = new {
+  path = target
+  text = json.renderDocument(value)
+  seals {}
+}
+
+local function asset(target: String, source: String): File = new {
+  path = target
+  text = source.replaceAllMapped(sealToken, (match) ->
+    read?("prop:sha256.\(match.groups[1].value)") ?? zeroDigest
+  )
+  seals {
+    for (reference in sealToken.findMatchesIn(source).map((match) -> match.groups[1].value).distinct) {
+      reference
+    }
+  }
+}
+
+files: Listing<File>(isDistinctBy((it) -> it.path)) = new {
+  for (harness in Integrations.harnesses) {
+    document("marketplace/harness/\(harness.id)/\(harness.fileName)", harness.document)
+  }
+  for (manifest in List(".claude-plugin", ".factory-plugin")) {
+    document("marketplace/git-attributed/\(manifest)/plugin.json", Integrations.plugin.document)
+  }
+  new File {
+    path = "marketplace/git-attributed/LICENSE"
+    text = read("../../LICENSE.upstream").text
+    seals {}
+  }
+  for (assetPath in Integrations.assets) {
+    asset(assetPath, read("\(assetRoot)\(assetPath)").text)
+  }
+}
+
+output {
+  renderer = new JsonRenderer {}
+  value = new Dynamic { files = module.files }
+}
