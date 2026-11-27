@@ -1,0 +1,839 @@
+package app
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+
+	"github.com/amichne/attributed/internal/hooks"
+	"github.com/amichne/attributed/internal/runner"
+	"github.com/amichne/attributed/internal/version"
+)
+
+// Update input caps bound untrusted local files before any expensive work.
+// A release archive is a few tens of MiB, so anything larger is not a
+// git-attributed release.
+const (
+	maxUpdateArchiveBytes  = 256 << 20
+	maxUpdateChecksumBytes = 1 << 20
+)
+
+// updateRepository is the pinned release source. The update command and
+// the version --check probe fetch only from this repository's release
+// pages over HTTPS, so a hostile mirror cannot become the update source.
+const updateRepository = "https://github.com/amichne/attributed"
+
+// updateLatestTag is the --version sentinel that resolves the newest
+// release instead of a pinned tag.
+const updateLatestTag = "latest"
+
+// runUpdate implements the update command. With no flags it downloads
+// the latest release from the pinned repository, verifies it against
+// its checksums, swaps the binary, and refreshes managed hooks. With
+// --archive and --checksums it updates offline from files the user
+// fetched on their own.
+func runUpdate(env *Env, command *command, args []string) (int, error) {
+	flags := flag.NewFlagSet(command.name, flag.ContinueOnError)
+	var output strings.Builder
+	flags.SetOutput(&output)
+	archivePath := ""
+	archiveSpecified := false
+	flags.Func("archive", "path to a staged release archive (offline update)", func(value string) error {
+		if archiveSpecified {
+			return errors.New("--archive specified more than once")
+		}
+		archivePath = value
+		archiveSpecified = true
+		return nil
+	})
+	checksumsPath := ""
+	checksumsSpecified := false
+	flags.Func("checksums", "path to the staged checksums.txt (offline update)", func(value string) error {
+		if checksumsSpecified {
+			return errors.New("--checksums specified more than once")
+		}
+		checksumsPath = value
+		checksumsSpecified = true
+		return nil
+	})
+	dryRun := flags.Bool("dry-run", false, "verify without replacing the binary")
+	targetTag := flags.String("version", "latest", "release tag to install, like v1.2.0")
+	noHooks := flags.Bool("no-hooks", false, "skip the managed hook refresh")
+	if err := flags.Parse(args); err != nil {
+		return flagError(env, command, output.String(), err)
+	}
+	if flags.NArg() != 0 {
+		return commandUsageError(env, command, errors.New("update takes no positional arguments"))
+	}
+	if archiveSpecified != checksumsSpecified {
+		return commandUsageError(env, command, errors.New("--archive and --checksums are required together"))
+	}
+	target, err := currentExecutable()
+	if err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if archiveSpecified {
+		if *targetTag != "latest" {
+			return commandUsageError(env, command, errors.New("--version cannot be combined with --archive and --checksums"))
+		}
+		return runOfflineUpdate(env, command, target, archivePath, checksumsPath, *dryRun, *noHooks)
+	}
+	return runFetchUpdate(env, command, target, *targetTag, *dryRun, *noHooks)
+}
+
+// runOfflineUpdate is the --archive --checksums path of update: verify the
+// staged files and swap the binary, then refresh managed hooks the same
+// way the download path does. The target path is passed in so tests can
+// point at a stand-in file instead of the test binary.
+func runOfflineUpdate(env *Env, command *command, target, archivePath, checksumsPath string, dryRun, noHooks bool) (int, error) {
+	if !supportedUpdateArchive(archivePath, runtime.GOOS) {
+		return commandUsageError(env, command, errors.New("unsupported archive: expected .tar.gz on Linux and macOS, .zip on Windows"))
+	}
+	if err := applyUpdate(env, updateOptions{
+		archivePath:   archivePath,
+		checksumsPath: checksumsPath,
+		targetPath:    target,
+		dryRun:        dryRun,
+	}); err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if !noHooks && !dryRun {
+		refreshHooks(env, target, runner.Detect)
+	}
+	return ExitSuccess, nil
+}
+
+// latestRelease is the automatic path's resolved release: the tag to
+// install, or the finished command result when no update should run.
+type latestRelease struct {
+	tag  string
+	done bool
+	code int
+	err  error
+}
+
+// resolveLatestRelease probes the latest release and decides whether
+// the automatic path should install it. The equal case reports the
+// current release and converges managed hooks like the pinned short
+// circuit; the newer case keeps the newer running binary and still
+// refreshes hooks; anything else installs the probe's tag.
+func resolveLatestRelease(env *Env, target string, rn *runner.Runner, noHooks, dryRun bool) (latestRelease, error) {
+	var result latestRelease
+	tag, err := rn.LatestTag(updateRepository)
+	if err != nil {
+		return result, err
+	}
+	result.tag = tag
+	if !version.IsRelease() {
+		return result, nil
+	}
+	switch version.CompareReleaseTags(version.Version, tag) {
+	case 0:
+		result.done = true
+		result.code, result.err = reportCurrentRelease(env, target, tag, noHooks, dryRun)
+	case 1:
+		// The automatic path never rolls the running binary back to an
+		// older latest-release pointer.
+		fmt.Fprintf(env.Stdout, "git-attributed %s is newer than the latest release %s; not updating automatically\n", version.Version, tag)
+		if !noHooks && !dryRun {
+			refreshHooks(env, target, runner.Detect)
+		}
+		result.done, result.code = true, ExitSuccess
+	}
+	return result, nil
+}
+
+// runFetchUpdate is the download path of update: resolve the release
+// tag, fetch the checksums and archive into a private directory, then
+// reuse the offline verify-and-swap machinery with an extra version
+// sanity check on the staged binary. The target path is passed in so
+// tests can point at a stand-in file instead of the test binary.
+func runFetchUpdate(env *Env, command *command, target, tag string, dryRun, noHooks bool) (int, error) {
+	if tag != updateLatestTag && !runner.ValidTag(tag) {
+		return commandUsageError(env, command, fmt.Errorf("unsupported release version: %s", tag))
+	}
+	// A pinned current release needs no curl at all, so the no-op path
+	// works on machines without network access too. Release builds stamp
+	// version.Version with the v prefix, so the tag compares directly. A
+	// pinned different release proceeds, even below the running one,
+	// because the pin is an explicit choice.
+	if tag != updateLatestTag && version.IsRelease() && version.Version == tag {
+		return reportCurrentRelease(env, target, tag, noHooks, dryRun)
+	}
+	rn, err := runner.New("")
+	if err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if tag == updateLatestTag {
+		resolved, err := resolveLatestRelease(env, target, rn, noHooks, dryRun)
+		if err != nil {
+			return operationalError(env, command.name, err)
+		}
+		if resolved.done {
+			return resolved.code, resolved.err
+		}
+		tag = resolved.tag
+	}
+	archiveName := releaseArchiveName(tag)
+	tmp, err := os.MkdirTemp("", "git-attributed-update-")
+	if err != nil {
+		return operationalError(env, command.name, fmt.Errorf("create download directory: %w", err))
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	base := updateRepository + "/releases/download/" + tag + "/"
+	checksumsPath := filepath.Join(tmp, "checksums.txt")
+	if err := rn.Fetch(base+"checksums.txt", checksumsPath, maxUpdateChecksumBytes); err != nil {
+		return operationalError(env, command.name, err)
+	}
+	archivePath := filepath.Join(tmp, archiveName)
+	if err := rn.Fetch(base+archiveName, archivePath, maxUpdateArchiveBytes); err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if err := applyUpdate(env, updateOptions{
+		archivePath:   archivePath,
+		checksumsPath: checksumsPath,
+		targetPath:    target,
+		dryRun:        dryRun,
+		releaseTag:    tag,
+		fetched:       true,
+	}); err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if !noHooks && !dryRun {
+		refreshHooks(env, target, runner.Detect)
+	}
+	return ExitSuccess, nil
+}
+
+// reportCurrentRelease refreshes hooks when asked to and reports the
+// no-op result for a release the running binary already matches.
+func reportCurrentRelease(env *Env, target, tag string, noHooks, dryRun bool) (int, error) {
+	if !noHooks && !dryRun {
+		refreshHooks(env, target, runner.Detect)
+	}
+	fmt.Fprintf(env.Stdout, "git-attributed %s is already up to date at %s\n", tag, target)
+	return ExitSuccess, nil
+}
+
+// releaseArchiveName returns the release archive name for the current
+// platform, mirroring the installer: .tar.gz on Linux and macOS, .zip on
+// Windows.
+func releaseArchiveName(tag string) string {
+	return releaseArchiveNameFor(tag, runtime.GOOS, runtime.GOARCH)
+}
+
+// releaseArchiveNameFor maps one release tag and platform to the release
+// archive name, kept as a pure function so every platform combination is
+// testable anywhere.
+func releaseArchiveNameFor(tag, goos, goarch string) string {
+	if goos == "windows" {
+		return fmt.Sprintf("git-attributed_%s_windows_%s.zip", strings.TrimPrefix(tag, "v"), goarch)
+	}
+	if goos == "darwin" {
+		goos = "macOS"
+	}
+	return fmt.Sprintf("git-attributed_%s_%s_%s.tar.gz", strings.TrimPrefix(tag, "v"), goos, goarch)
+}
+
+// updateOptions is one local update request. releaseTag and fetched are
+// set by the download path only: releaseTag drives the staged version
+// check and the final report, fetched says the archive already sits in a
+// private download directory and needs no staging copy.
+type updateOptions struct {
+	archivePath   string
+	checksumsPath string
+	targetPath    string
+	dryRun        bool
+	releaseTag    string
+	fetched       bool
+}
+
+// applyUpdate verifies the archive, extracts the new binary next to the
+// target, and swaps it in. Every failure path leaves the target unchanged.
+func applyUpdate(env *Env, o updateOptions) error {
+	expected, err := readChecksumFor(o.checksumsPath, filepath.Base(o.archivePath))
+	if err != nil {
+		return err
+	}
+	// A user-supplied archive is hashed and read through one private
+	// staging copy, so a file swapped at the original path between the
+	// checksum check and extraction cannot bypass verification. A fetched
+	// archive already sits in a private download directory, so it is
+	// hashed in place and no copy is made.
+	verifiedArchive := o.archivePath
+	if !o.fetched {
+		verifiedArchive, err = stageArchiveCopy(o.archivePath, filepath.Dir(o.targetPath))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.Remove(verifiedArchive) }()
+	}
+	actual, err := hashFile(verifiedArchive)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("checksum mismatch for %s", o.archivePath)
+	}
+	staged, err := extractUpdateBinary(verifiedArchive, filepath.Dir(o.targetPath))
+	if err != nil {
+		return err
+	}
+	swapped := false
+	defer func() {
+		if !swapped {
+			_ = os.Remove(staged)
+		}
+	}()
+	if o.releaseTag != "" {
+		// The download path additionally runs the staged binary once,
+		// exactly like install.sh, so a checksummed archive for a
+		// different release cannot replace the target.
+		expectVersion := "git-attributed " + o.releaseTag
+		out, _, err := runner.Run(staged, "version")
+		if err != nil {
+			return err
+		}
+		if reported := strings.TrimSpace(out); reported != expectVersion {
+			return fmt.Errorf("staged binary reports %s, want %s", reported, expectVersion)
+		}
+	}
+	if o.dryRun {
+		fmt.Fprintf(env.Stdout, "Dry run: verified %s; would replace %s\n", o.archivePath, o.targetPath)
+		return nil
+	}
+	leftOld, err := swapBinary(staged, o.targetPath)
+	if err != nil {
+		return err
+	}
+	swapped = true
+	if o.releaseTag != "" {
+		fmt.Fprintf(env.Stdout, "Updated git-attributed to %s at %s (was %s)\n", o.releaseTag, o.targetPath, version.Version)
+	} else {
+		fmt.Fprintf(env.Stdout, "Updated git-attributed at %s (was %s)\n", o.targetPath, version.Version)
+	}
+	if leftOld != "" {
+		fmt.Fprintf(env.Stdout, "The previous binary stays at %s until this process exits; delete it afterwards.\n", leftOld)
+	}
+	fmt.Fprintln(env.Stdout, "Run 'git-attributed version' to confirm the new version.")
+	return nil
+}
+
+// currentExecutable returns the absolute path of the running binary with
+// symlinks resolved, so an update replaces the real file, not a link.
+func currentExecutable() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate running binary: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve running binary path: %w", err)
+	}
+	return resolved, nil
+}
+
+// supportedUpdateArchive reports whether the archive name matches the
+// release layout for one operating system: .tar.gz on Linux and macOS,
+// .zip on Windows. A checksummed archive for the wrong system would pass
+// verification and install a binary that cannot run there.
+func supportedUpdateArchive(archivePath, goos string) bool {
+	lower := strings.ToLower(archivePath)
+	if goos == "windows" {
+		return strings.HasSuffix(lower, ".zip")
+	}
+	return strings.HasSuffix(lower, ".tar.gz")
+}
+
+// readChecksumFor returns the SHA-256 value recorded for one archive in a
+// checksums.txt file, rejecting missing and duplicate entries.
+func readChecksumFor(checksumsPath, archiveName string) (string, error) {
+	file, err := os.Open(checksumsPath)
+	if err != nil {
+		return "", fmt.Errorf("open checksums: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxUpdateChecksumBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read checksums: %w", err)
+	}
+	if len(data) > maxUpdateChecksumBytes {
+		return "", fmt.Errorf("checksums exceed %d bytes", maxUpdateChecksumBytes)
+	}
+	expected := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name != archiveName {
+			continue
+		}
+		if expected != "" {
+			return "", fmt.Errorf("duplicate checksum entry for %s", archiveName)
+		}
+		sum := strings.ToLower(fields[0])
+		if len(sum) != sha256.Size*2 {
+			return "", fmt.Errorf("invalid checksum entry for %s", archiveName)
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			return "", fmt.Errorf("invalid checksum entry for %s", archiveName)
+		}
+		expected = sum
+	}
+	if expected == "" {
+		return "", fmt.Errorf("no checksum entry for %s in %s", archiveName, checksumsPath)
+	}
+	return expected, nil
+}
+
+// stageArchiveCopy copies the archive into a private staging file in
+// targetDir, bounded by the update archive cap. The staging name keeps the
+// archive suffix, because extraction dispatches on it. The caller removes it.
+func stageArchiveCopy(archivePath, targetDir string) (string, error) {
+	source, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open archive: %w", err)
+	}
+	defer source.Close()
+	suffix := ".tar.gz"
+	if updateIsZip(archivePath) {
+		suffix = ".zip"
+	}
+	staged, err := os.CreateTemp(targetDir, ".git-attributed-archive-*"+suffix)
+	if err != nil {
+		return "", fmt.Errorf("create archive staging file: %w", err)
+	}
+	kept := false
+	defer func() {
+		if !kept {
+			_ = staged.Close()
+			_ = os.Remove(staged.Name())
+		}
+	}()
+	written, err := io.Copy(staged, io.LimitReader(source, maxUpdateArchiveBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read archive: %w", err)
+	}
+	if written > maxUpdateArchiveBytes {
+		return "", fmt.Errorf("archive exceeds %d bytes", maxUpdateArchiveBytes)
+	}
+	if err := staged.Close(); err != nil {
+		return "", fmt.Errorf("close archive staging file: %w", err)
+	}
+	kept = true
+	return staged.Name(), nil
+}
+
+// hashFile returns the lowercase SHA-256 of one file, bounded by the update
+// archive cap.
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open archive: %w", err)
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	written, err := io.Copy(hasher, io.LimitReader(file, maxUpdateArchiveBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read archive: %w", err)
+	}
+	if written > maxUpdateArchiveBytes {
+		return "", fmt.Errorf("archive exceeds %d bytes", maxUpdateArchiveBytes)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// extractUpdateBinary pulls exactly the release binary out of a verified
+// archive into a staging file in targetDir, enforcing the same entry
+// allowlist the installers enforce. On Windows the staging file keeps the
+// .exe suffix so the staged version check can run it.
+func extractUpdateBinary(archivePath, targetDir string) (string, error) {
+	staged, err := os.CreateTemp(targetDir, stagedUpdatePattern(runtime.GOOS))
+	if err != nil {
+		return "", fmt.Errorf("create staging file: %w", err)
+	}
+	kept := false
+	defer func() {
+		if !kept {
+			// Windows refuses to remove an open file, so close before
+			// removing on every failure path.
+			_ = staged.Close()
+			_ = os.Remove(staged.Name())
+		}
+	}()
+	binaryName := "git-attributed"
+	if updateIsZip(archivePath) {
+		binaryName = "git-attributed.exe"
+	}
+	allowlist := []string{"LICENSE", "README.md", "SECURITY.md", binaryName}
+	var names []string
+	if updateIsZip(archivePath) {
+		names, err = readUpdateZip(archivePath, binaryName, staged)
+	} else {
+		names, err = readUpdateTar(archivePath, binaryName, staged)
+	}
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(allowlist)
+	if !sameStringSlice(names, allowlist) {
+		return "", fmt.Errorf("unexpected files in %s", archivePath)
+	}
+	if runtime.GOOS != "windows" {
+		if err := staged.Chmod(0o755); err != nil {
+			return "", fmt.Errorf("set staging permissions: %w", err)
+		}
+	}
+	if err := staged.Close(); err != nil {
+		return "", fmt.Errorf("close staging file: %w", err)
+	}
+	kept = true
+	return staged.Name(), nil
+}
+
+// updateIsZip reports whether the update reads the Windows zip release
+// layout instead of the POSIX tar.gz one.
+func updateIsZip(archivePath string) bool {
+	return strings.HasSuffix(strings.ToLower(archivePath), ".zip")
+}
+
+// stagedUpdatePattern returns the staging file pattern for one platform.
+// On Windows the pattern keeps the .exe suffix, because the staged version
+// check can only run a file Windows recognizes as executable.
+func stagedUpdatePattern(goos string) string {
+	if goos == "windows" {
+		return ".git-attributed-update-*.exe"
+	}
+	return ".git-attributed-update-*"
+}
+
+func readUpdateTar(archivePath, binaryName string, staged *os.File) ([]string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive: %w", err)
+	}
+	defer file.Close()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("read gzip stream: %w", err)
+	}
+	defer gzipReader.Close()
+	reader := tar.NewReader(gzipReader)
+	names := []string{}
+	found := false
+	var remaining int64 = maxUpdateArchiveBytes
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read archive: %w", err)
+		}
+		// Bound every declared entry, not only the binary: a tiny gzip
+		// stream can declare a huge allowlisted entry and force the
+		// reader to drain it.
+		if header.Size > remaining {
+			return nil, fmt.Errorf("archive entry %s exceeds the %d-byte archive budget", header.Name, maxUpdateArchiveBytes)
+		}
+		remaining -= header.Size
+		name := updateEntryName(header.Name)
+		if name == "" {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg {
+			return nil, fmt.Errorf("archive entry %s is not a regular file", name)
+		}
+		names = append(names, name)
+		if name != binaryName {
+			continue
+		}
+		written, err := io.Copy(staged, io.LimitReader(reader, maxUpdateArchiveBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("extract %s: %w", name, err)
+		}
+		if written > maxUpdateArchiveBytes {
+			return nil, fmt.Errorf("extracted %s exceeds %d bytes", name, maxUpdateArchiveBytes)
+		}
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("archive is missing %s", binaryName)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func readUpdateZip(archivePath, binaryName string, staged *os.File) ([]string, error) {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive: %w", err)
+	}
+	defer reader.Close()
+	names := []string{}
+	found := false
+	var remaining int64 = maxUpdateArchiveBytes
+	for _, entry := range reader.File {
+		// Bound every declared entry like the tar path, so a small zip
+		// cannot declare an oversized allowlisted file.
+		if entry.UncompressedSize64 > uint64(remaining) {
+			return nil, fmt.Errorf("archive entry %s exceeds the %d-byte archive budget", entry.Name, maxUpdateArchiveBytes)
+		}
+		remaining -= int64(entry.UncompressedSize64)
+		name := updateEntryName(entry.Name)
+		if name == "" {
+			continue
+		}
+		if !entry.FileInfo().Mode().IsRegular() {
+			return nil, fmt.Errorf("archive entry %s is not a regular file", name)
+		}
+		names = append(names, name)
+		if name != binaryName {
+			continue
+		}
+		source, err := entry.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open archive entry %s: %w", name, err)
+		}
+		written, copyErr := io.Copy(staged, io.LimitReader(source, maxUpdateArchiveBytes+1))
+		closeErr := source.Close()
+		if copyErr != nil {
+			return nil, fmt.Errorf("extract %s: %w", name, copyErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close archive entry %s: %w", name, closeErr)
+		}
+		if written > maxUpdateArchiveBytes {
+			return nil, fmt.Errorf("extracted %s exceeds %d bytes", name, maxUpdateArchiveBytes)
+		}
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("archive is missing %s", binaryName)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// updateEntryName normalizes one archive entry name and returns "" for
+// entries the installers ignore: directories and macOS AppleDouble files.
+func updateEntryName(name string) string {
+	name = strings.TrimPrefix(name, "./")
+	if name == "" || strings.HasSuffix(name, "/") {
+		return ""
+	}
+	if strings.HasPrefix(filepath.Base(name), "._") {
+		return ""
+	}
+	return name
+}
+
+// sameStringSlice reports whether two sorted slices are equal.
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// swapBinary replaces target with staged. On Windows the running image
+// cannot be overwritten in place, so the old binary moves aside first; when
+// the old file cannot be deleted because this process still runs, its path
+// is returned for the caller to report.
+func swapBinary(staged, target string) (string, error) {
+	return swapBinaryFunc(runtime.GOOS, os.Rename, os.Remove, staged, target)
+}
+
+// installHooksCommand and agentFlag name the CLI surface the post-swap
+// hook refresh invokes on the installed binary.
+const (
+	installHooksCommand = "install-hooks"
+	agentFlag           = "--agent"
+)
+
+// hooksSourceFile is the harness file of every agent that reads a hooks.json
+// style project hook file.
+const hooksSourceFile = "hooks.json"
+
+// openCodeAgent names the manual agent that loads a plugin instead of a hook
+// file. The plugin is unverified on Windows, and install.sh looks for the
+// agent in the XDG config directory.
+const openCodeAgent = "opencode"
+
+// userAgent is one agent git-attributed configures itself at user level, so
+// the update refresh matches the installer's detection.
+type userAgent struct {
+	name      string
+	command   string
+	configDir string
+}
+
+// userAgents mirrors the installer's user-level hook list.
+var userAgents = []userAgent{
+	{name: "droid", command: "droid", configDir: ".factory"},
+	{name: "claude", command: "claude", configDir: ".claude"},
+}
+
+// manualAgent is one agent git-attributed cannot configure itself; the
+// update prints the same single copy command the installer prints.
+type manualAgent struct {
+	name       string
+	command    string
+	configDir  string
+	hookPath   string
+	sourceFile string
+}
+
+// manualAgents mirrors the installer's per-project hook list; keep it in
+// lockstep with install.sh.
+var manualAgents = []manualAgent{
+	{name: "gemini", command: "gemini", configDir: ".gemini", hookPath: ".gemini/settings.json", sourceFile: "settings.json"},
+	{name: "cursor", command: "cursor", configDir: ".cursor", hookPath: ".cursor/hooks.json", sourceFile: hooksSourceFile},
+	{name: "codex", command: "codex", configDir: ".codex", hookPath: ".codex/hooks.json", sourceFile: hooksSourceFile},
+	{name: "windsurf", command: "windsurf", configDir: ".codeium", hookPath: ".windsurf/hooks.json", sourceFile: hooksSourceFile},
+	{name: "copilot", command: "code", configDir: ".vscode", hookPath: ".github/hooks/promptscript.json", sourceFile: hooksSourceFile},
+	{name: "grok", command: "grok", configDir: ".grok", hookPath: ".grok/hooks/promptscript.json", sourceFile: hooksSourceFile},
+	{name: openCodeAgent, command: openCodeAgent, hookPath: ".opencode/plugins/promptscript.ts", sourceFile: "promptscript.ts"},
+}
+
+// refreshHooks converges managed hooks after a binary swap, mirroring the
+// installer: project Git hooks when run inside a worktree, the managed Git
+// template when it is already the configured one, user-level hooks for
+// every detected agent git-attributed owns, and the copy command for the rest.
+// detect is passed in so tests control agent discovery. Failures warn and
+// continue, because a hook refresh problem must not undo a completed
+// update.
+func refreshHooks(env *Env, target string, detect func(command, configDir string) bool) {
+	if _, err := discoverForEnv(env); err == nil {
+		refreshStep(env, target, installHooksCommand, agentFlag, "none", "--git", "--project")
+	}
+	if configured, err := hooks.ManagedTemplateConfigured(); err != nil {
+		// A configuration read failure must warn and continue the
+		// remaining refresh steps, never roll the update back.
+		fmt.Fprintf(env.Stderr, "git-attributed could not read the Git template configuration: %v\n", err)
+	} else if configured {
+		refreshStep(env, target, installHooksCommand, agentFlag, "none", "--git", "--template")
+	}
+	for _, agent := range userAgents {
+		if !detect(agent.command, agent.configDir) {
+			continue
+		}
+		if _, _, err := runner.Run(target, installHooksCommand, agentFlag, agent.name, "--user"); err != nil {
+			fmt.Fprintf(env.Stderr, "Could not install the %s hook. Run: git-attributed install-hooks --agent %s --user\n", agent.name, agent.name)
+			continue
+		}
+		fmt.Fprintf(env.Stdout, "Installed the %s hook for every repository.\n", agent.name)
+	}
+	pending := detectManualAgents(runtime.GOOS, detect)
+	if len(pending) == 0 {
+		return
+	}
+	fmt.Fprintln(env.Stdout, "Detected agents that need one project integration file:")
+	for _, agent := range pending {
+		fmt.Fprintf(env.Stdout, "  %-14s curl -fsSL --proto =https --tlsv1.2 -o %s --create-dirs \\\n", agent.name, agent.hookPath)
+		fmt.Fprintf(env.Stdout, "                   %s/raw/main/marketplace/harness/%s/%s\n",
+			updateRepository, agent.name, agent.sourceFile)
+	}
+	fmt.Fprintln(env.Stdout, "Merge the block for gemini instead of replacing the file.")
+	fmt.Fprintf(env.Stdout, "Details: %s/blob/main/marketplace/harness/README.md\n", updateRepository)
+}
+
+// detectManualAgents returns the manual agents found on this machine, in list
+// order. goos is a parameter so tests reach the Windows skip on any platform.
+func detectManualAgents(goos string, detect func(command, configDir string) bool) []manualAgent {
+	found := []manualAgent{}
+	for _, agent := range manualAgents {
+		configDir := agent.configDir
+		if agent.name == openCodeAgent {
+			if goos == "windows" {
+				continue
+			}
+			configDir = openCodeConfigDir()
+		}
+		if detect(agent.command, configDir) {
+			found = append(found, agent)
+		}
+	}
+	return found
+}
+
+// openCodeConfigDir returns the OpenCode configuration directory the way
+// install.sh does: below XDG_CONFIG_HOME, or below ~/.config when it is
+// unset. It is empty when the home directory is unknown.
+func openCodeConfigDir() string {
+	configRoot := os.Getenv("XDG_CONFIG_HOME")
+	if configRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		configRoot = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configRoot, "opencode")
+}
+
+// refreshStep runs one install-hooks pass through the freshly installed
+// binary and passes its output through, so the refreshed hooks report
+// themselves exactly like a fresh install.
+func refreshStep(env *Env, target string, args ...string) {
+	out, runErr, err := runner.Run(target, args...)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "git-attributed %s failed: %v\n", strings.Join(args, " "), err)
+		return
+	}
+	fmt.Fprint(env.Stdout, out)
+	if runErr != "" {
+		fmt.Fprint(env.Stderr, runErr)
+	}
+}
+
+// swapBinaryFunc is swapBinary with the platform and the file operations
+// injected, so the Windows failure paths stay testable on every platform.
+// When the swap fails, the previous binary is restored; if the restore also
+// fails, the error says so and where the previous binary remains, rather
+// than hiding the recovery path.
+func swapBinaryFunc(goos string, rename func(string, string) error, remove func(string) error, staged, target string) (string, error) {
+	if goos != "windows" {
+		if err := rename(staged, target); err != nil {
+			return "", fmt.Errorf("replace binary: %w", err)
+		}
+		return "", nil
+	}
+	old := target + ".old"
+	_ = remove(old)
+	if err := rename(target, old); err != nil {
+		return "", fmt.Errorf("move current binary away: %w", err)
+	}
+	if err := rename(staged, target); err != nil {
+		if restoreErr := rename(old, target); restoreErr != nil {
+			return "", fmt.Errorf("place new binary: %w; restoring the previous binary also failed: %v; the previous binary remains at %s", err, restoreErr, old)
+		}
+		return "", fmt.Errorf("place new binary: %w", err)
+	}
+	if err := remove(old); err != nil {
+		return old, nil
+	}
+	return "", nil
+}

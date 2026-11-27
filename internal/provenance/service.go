@@ -1,0 +1,1684 @@
+// Package provenance orchestrates checkpoints, notes, and line attribution.
+package provenance
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/amichne/attributed/internal/engine"
+	"github.com/amichne/attributed/internal/gitcmd"
+	"github.com/amichne/attributed/internal/lock"
+	"github.com/amichne/attributed/internal/model"
+	"github.com/amichne/attributed/internal/notes"
+	"github.com/amichne/attributed/internal/preset"
+	"github.com/amichne/attributed/internal/store"
+	"github.com/amichne/attributed/internal/transcript"
+)
+
+const lockTimeout = 10 * time.Second
+
+var errUnsupportedBase = errors.New("unsupported base content or attribution")
+
+const (
+	maxBlameCollectionFiles = notes.MaxFiles
+	maxBlameCollectionLines = 100_000
+	maxBlameCollectionBytes = 16 << 20
+	maxShellPaths           = 500
+	maxShellSnapshotBytes   = 16 << 20
+)
+
+var errShellPathLimit = errors.New("shell event contains more than 500 paths")
+
+// CaptureResult reports a checkpoint write.
+type CaptureResult struct {
+	Recorded int
+	Warnings []string
+}
+
+// CaptureEvent records one normalized agent event. Edit paths are recorded
+// in the worktree of the repository that owns them, so a hook that runs in
+// one worktree still records an agent edit in another. Shell events stay
+// with repo because their paths come from its own dirty state.
+func CaptureEvent(repo *gitcmd.Repo, event preset.Event, now time.Time) (CaptureResult, error) {
+	if (event.Kind != "" && event.Kind != model.CheckpointKindEdit) || len(event.Paths) == 0 {
+		return Capture(repo, event, now)
+	}
+	routes, warnings, err := repo.RouteWorktreePaths(event.Paths)
+	if err != nil {
+		return CaptureResult{}, fmt.Errorf("route checkpoint paths: %w", err)
+	}
+	result := CaptureResult{Warnings: warnings}
+	for _, route := range routes {
+		routed := event
+		routed.Paths = route.Paths
+		captured, err := Capture(route.Repo, routed, now)
+		prefix := ""
+		if route.Repo != repo {
+			prefix = fmt.Sprintf("worktree %q: ", route.Repo.Root)
+		}
+		if err != nil {
+			return CaptureResult{}, fmt.Errorf("%s%w", prefix, err)
+		}
+		result.Recorded += captured.Recorded
+		for _, warning := range captured.Warnings {
+			result.Warnings = append(result.Warnings, prefix+warning)
+		}
+	}
+	return result, nil
+}
+
+// Capture records one normalized agent event in repo.
+func Capture(repo *gitcmd.Repo, event preset.Event, now time.Time) (CaptureResult, error) {
+	if event.Type != model.AuthorHuman && event.Type != model.AuthorAI {
+		return CaptureResult{}, fmt.Errorf("unsupported event author %q", event.Type)
+	}
+	kind := event.Kind
+	if kind == "" {
+		kind = model.CheckpointKindEdit
+	}
+	switch kind {
+	case model.CheckpointKindEdit:
+	case model.CheckpointKindShellPre:
+		if event.Type != model.AuthorHuman {
+			return CaptureResult{}, errors.New("shell_pre event must be human")
+		}
+	case model.CheckpointKindShellPost:
+		if event.Type != model.AuthorAI {
+			return CaptureResult{}, errors.New("shell_post event must be ai")
+		}
+	default:
+		return CaptureResult{}, fmt.Errorf("unsupported checkpoint kind %q", kind)
+	}
+	attribution := model.Attribution{Author: event.Type}
+	if event.Type == model.AuthorAI {
+		attribution.Agent = event.Agent
+		attribution.Model = event.Model
+		attribution.Session = event.Session
+	}
+	if err := model.ValidateAttribution(attribution); err != nil {
+		return CaptureResult{}, fmt.Errorf("validate event attribution: %w", err)
+	}
+	if err := model.ValidateEventID(event.EventID); err != nil {
+		return CaptureResult{}, fmt.Errorf("validate event identifier: %w", err)
+	}
+	dataStore := store.New(repo.GitDir)
+	held, err := lock.Acquire(dataStore.LockPath(), lockTimeout)
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	defer held.Release()
+
+	records, logWarnings, err := dataStore.ReadCheckpoints()
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	warnings := append([]string(nil), logWarnings...)
+	state, stateMigration, err := dataStore.ReadStateForUpdate()
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	branchRef, _, err := repo.CurrentBranchRef()
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	seq := state.LastCheckpointSeq + 1
+	if len(records) > 0 && records[len(records)-1].Seq >= seq {
+		seq = records[len(records)-1].Seq + 1
+	}
+	laneID := currentCheckpointLaneID(records, state, branchRef, head, seq)
+	paths := append([]string(nil), event.Paths...)
+	var before model.Checkpoint
+	if kind == model.CheckpointKindShellPre {
+		var err error
+		paths, err = shellDirtyPaths(repo)
+		if err != nil {
+			if errors.Is(err, errShellPathLimit) {
+				warnings = append(warnings, "ignored shell event with more than 500 paths")
+				return CaptureResult{Warnings: warnings}, nil
+			}
+			return CaptureResult{}, err
+		}
+	} else if kind == model.CheckpointKindShellPost {
+		var found bool
+		before, found = shellPreForPost(records, event.EventID)
+		if !found {
+			warnings = append(warnings, "ignored shell_post without a matching shell_pre")
+			return CaptureResult{Warnings: warnings}, nil
+		}
+		if before.BaseCommit != head ||
+			(before.Version >= model.CheckpointVersionV2 && before.BranchRef != branchRef) {
+			warnings = append(warnings, "ignored shell_post with a different base or branch context")
+			return CaptureResult{Warnings: warnings}, nil
+		}
+		var err error
+		paths, err = shellPostPaths(repo, before)
+		if err != nil {
+			if errors.Is(err, errShellPathLimit) {
+				warnings = append(warnings, "ignored shell event with more than 500 paths")
+				return CaptureResult{Warnings: warnings}, nil
+			}
+			return CaptureResult{}, err
+		}
+	}
+	shell := kind == model.CheckpointKindShellPre || kind == model.CheckpointKindShellPost
+	// Every agent shell command snapshots all dirty paths twice. Content
+	// that an unconsumed checkpoint already stored needs no new write, and
+	// one check-ignore run covers all paths.
+	var stored map[string]bool
+	if shell {
+		defer repo.StartBatch()()
+		repo.PrefetchIgnored(paths)
+		stored = map[string]bool{}
+		for _, blob := range retainedBlobs(records, state, model.Checkpoint{}) {
+			stored[blob] = true
+		}
+	}
+	snapshots := make([]model.Snapshot, 0, len(paths))
+	seen := map[string]bool{}
+	var shellBytes int64
+	for _, path := range paths {
+		normalized, err := repo.NormalizeWorktreePath(path)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("skipped %q: %v", path, err))
+			continue
+		}
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		var snapshot model.Snapshot
+		var snapshotBytes int64
+		if shell {
+			remaining := int64(maxShellSnapshotBytes) - shellBytes
+			snapshot, snapshotBytes, err = repo.SnapshotWorktreeStored(normalized, remaining, stored)
+		} else {
+			snapshot, err = repo.SnapshotWorktree(normalized)
+		}
+		if err != nil {
+			if shell && errors.Is(err, gitcmd.ErrSnapshotBudget) {
+				warnings = append(warnings, "stopped shell snapshot at the 16 MiB aggregate budget")
+				break
+			}
+			warnings = append(warnings, fmt.Sprintf("skipped %q: %v", normalized, err))
+			continue
+		}
+		shellBytes += snapshotBytes
+		if kind == model.CheckpointKindShellPost {
+			previous, err := shellPreviousSnapshot(repo, head, before, normalized)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("skipped %q: %v", normalized, err))
+				continue
+			}
+			if snapshotsEqualWorktree(previous, snapshot) {
+				continue
+			}
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	if kind == model.CheckpointKindShellPre && len(records) > 0 &&
+		records[len(records)-1].Kind == model.CheckpointKindShellPre &&
+		records[len(records)-1].EventID == event.EventID &&
+		records[len(records)-1].BaseCommit == head &&
+		records[len(records)-1].BranchRef == branchRef &&
+		snapshotsEqualCheckpoints(records[len(records)-1].Files, snapshots) {
+		return CaptureResult{}, nil
+	}
+	if len(snapshots) == 0 && kind == model.CheckpointKindEdit {
+		return CaptureResult{Warnings: warnings}, nil
+	}
+	// A shell command that changed nothing, like most read-only commands,
+	// leaves no evidence. Its shell_pre only repeats human worktree state
+	// that the next checkpoint or the commit fallback attributes the same
+	// way, so the pair goes away instead of filling the queue.
+	if len(snapshots) == 0 && kind == model.CheckpointKindShellPost {
+		if _, err := dataStore.DropCheckpointRecords(map[uint64]bool{before.Seq: true}); err != nil {
+			return CaptureResult{}, fmt.Errorf("drop unchanged shell_pre: %w", err)
+		}
+		return CaptureResult{Warnings: warnings}, nil
+	}
+	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].Path < snapshots[j].Path })
+	record := model.Checkpoint{
+		Version:    model.CheckpointVersion,
+		Kind:       kind,
+		Seq:        seq,
+		BaseCommit: head,
+		BranchRef:  branchRef,
+		LaneID:     laneID,
+		EventID:    event.EventID,
+		TS:         now.UTC().Format(time.RFC3339Nano),
+		Type:       event.Type,
+		Files:      snapshots,
+	}
+	if event.Type == model.AuthorAI {
+		record.Agent = event.Agent
+		record.Model = event.Model
+		record.Session = event.Session
+	}
+	// Usage enriches the checkpoint but is not evidence, so an unreadable
+	// transcript or an invalid block drops the usage and keeps the record.
+	if event.Type == model.AuthorAI && event.TranscriptPath != "" {
+		if usage, found, err := transcript.ResolveUsage(event.TranscriptPath); err == nil && found {
+			candidate := model.CheckpointUsage{
+				MsgID:      usage.MsgID,
+				TokensIn:   usage.TokensIn,
+				TokensOut:  usage.TokensOut,
+				CacheRead:  usage.CacheRead,
+				CacheWrite: usage.CacheWrite,
+			}
+			if model.ValidateCheckpointUsage(candidate) == nil {
+				record.Usage = &candidate
+			}
+		}
+	}
+	if err := dataStore.CheckCheckpointAppend(record, len(records)+len(logWarnings)); err != nil {
+		return CaptureResult{}, err
+	}
+	if stateMigration {
+		if err := dataStore.WriteState(state); err != nil {
+			return CaptureResult{}, fmt.Errorf("persist state migration: %w", err)
+		}
+	}
+	retained := retainedBlobs(records, state, record)
+	if err := repo.ProtectBlobs(retained); err != nil {
+		return CaptureResult{}, fmt.Errorf("protect checkpoint blobs: %w", err)
+	}
+	if err := dataStore.AppendCheckpoint(record); err != nil {
+		return CaptureResult{}, err
+	}
+	return CaptureResult{Recorded: len(snapshots), Warnings: warnings}, nil
+}
+
+func currentCheckpointLaneID(
+	records []model.Checkpoint,
+	state model.State,
+	branchRef, base string,
+	nextSeq uint64,
+) string {
+	for index := len(records) - 1; index >= 0; index-- {
+		record := records[index]
+		if checkpointConsumed(record, state) {
+			continue
+		}
+		if record.Version >= model.CheckpointVersionV2 &&
+			record.BranchRef == branchRef &&
+			record.BaseCommit == base {
+			return record.LaneID
+		}
+	}
+	return model.CheckpointLaneID(nextSeq)
+}
+
+func shellDirtyPaths(repo *gitcmd.Repo) ([]string, error) {
+	paths, err := repo.DirtyPaths()
+	if err != nil {
+		return nil, fmt.Errorf("list shell paths: %w", err)
+	}
+	if len(paths) > maxShellPaths {
+		return nil, errShellPathLimit
+	}
+	return paths, nil
+}
+
+func shellPostPaths(repo *gitcmd.Repo, before model.Checkpoint) ([]string, error) {
+	paths, err := repo.DirtyPaths()
+	if err != nil {
+		return nil, fmt.Errorf("list shell paths: %w", err)
+	}
+	unique := make(map[string]bool, len(paths)+len(before.Files))
+	for _, path := range paths {
+		unique[path] = true
+	}
+	for _, file := range before.Files {
+		unique[file.Path] = true
+	}
+	paths = paths[:0]
+	for path := range unique {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	if len(paths) > maxShellPaths {
+		return nil, errShellPathLimit
+	}
+	return paths, nil
+}
+
+func shellPreForPost(records []model.Checkpoint, eventID string) (model.Checkpoint, bool) {
+	var unpaired []model.Checkpoint
+	for _, record := range records {
+		switch record.Kind {
+		case model.CheckpointKindShellPre:
+			unpaired = append(unpaired, record)
+		case model.CheckpointKindShellPost:
+			index := latestShellPreIndex(unpaired, record.EventID, record.EventID != "")
+			if index >= 0 {
+				unpaired = append(unpaired[:index], unpaired[index+1:]...)
+			}
+		}
+	}
+	index := latestShellPreIndex(unpaired, eventID, eventID != "")
+	if index < 0 {
+		return model.Checkpoint{}, false
+	}
+	return unpaired[index], true
+}
+
+func latestShellPreIndex(records []model.Checkpoint, eventID string, requireID bool) int {
+	for index := len(records) - 1; index >= 0; index-- {
+		if !requireID || records[index].EventID == eventID {
+			return index
+		}
+	}
+	return -1
+}
+
+func shellPreviousSnapshot(repo *gitcmd.Repo, head string, before model.Checkpoint, path string) (model.Snapshot, error) {
+	for _, file := range before.Files {
+		if file.Path == path {
+			return file, nil
+		}
+	}
+	if head == "" {
+		return model.Snapshot{Path: path}, nil
+	}
+	blob, exists, err := repo.BlobID(head, path)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	return model.Snapshot{Path: path, Exists: exists, Blob: blob}, nil
+}
+
+func snapshotsEqualWorktree(left, right model.Snapshot) bool {
+	return left.Exists == right.Exists && left.Blob == right.Blob
+}
+
+func snapshotsEqualCheckpoints(left, right []model.Snapshot) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// checkpointConsumed reports whether an annotation already consumed a
+// checkpoint record. The version 1 scalar watermark stays a frozen floor:
+// version 1 could only consume an unbroken journal prefix, so every sequence
+// at or below the floor is consumed and the floor never advances again.
+// Version 3 consumption is per branch and base context: a record counts as
+// consumed when its own lane reached its sequence.
+func checkpointConsumed(record model.Checkpoint, state model.State) bool {
+	if record.Seq <= state.LastCheckpointSeq {
+		return true
+	}
+	branchLanes := state.Lanes[record.BranchRef]
+	consumed, ok := branchLanes[checkpointLaneID(record)]
+	return ok && record.Seq <= consumed
+}
+
+func checkpointLaneID(record model.Checkpoint) string {
+	if record.Version == model.CheckpointVersionV1 {
+		return model.LegacyCheckpointLaneID(record.BaseCommit)
+	}
+	return record.LaneID
+}
+
+func retainedBlobs(records []model.Checkpoint, state model.State, extra model.Checkpoint) []string {
+	var result []string
+	for _, record := range records {
+		if checkpointConsumed(record, state) {
+			continue
+		}
+		for _, file := range record.Files {
+			if file.Exists {
+				result = append(result, file.Blob)
+			}
+		}
+	}
+	for _, file := range state.Pending.Files {
+		result = append(result, file.Blob)
+	}
+	for _, file := range extra.Files {
+		if file.Exists {
+			result = append(result, file.Blob)
+		}
+	}
+	return result
+}
+
+// AnnotateResult reports a completed commit annotation.
+type AnnotateResult struct {
+	Commit             string   `json:"commit,omitempty"`
+	Files              int      `json:"files"`
+	Noop               bool     `json:"noop,omitempty"`
+	Skipped            bool     `json:"skipped,omitempty"`
+	DroppedCheckpoints int      `json:"dropped_checkpoints,omitempty"`
+	ParkedCheckpoints  int      `json:"parked_checkpoints,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
+}
+
+type sessionMetrics map[string]*model.NoteSession
+
+// Annotate writes deterministic attribution for HEAD.
+func Annotate(repo *gitcmd.Repo) (AnnotateResult, error) {
+	dataStore := store.New(repo.GitDir)
+	commonLock, err := lock.Acquire(filepath.Join(repo.CommonDir, "attributed", "notes.lock"), lockTimeout)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	defer commonLock.Release()
+	held, err := lock.Acquire(dataStore.LockPath(), lockTimeout)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	defer held.Release()
+
+	head, err := repo.Head()
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	if head == "" {
+		return AnnotateResult{}, errors.New("cannot annotate an unborn repository")
+	}
+	branchRef, _, err := repo.CurrentBranchRef()
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	// A rebase replay creates commits without fresh checkpoint evidence.
+	// Annotating them would guess attribution and then block the post-rewrite
+	// remap of the real evidence, so replayed commits wait for post-rewrite.
+	action, fastForward, err := repo.HeadReflogAction()
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	if strings.HasPrefix(action, "rebase") {
+		return AnnotateResult{
+			Commit:  head,
+			Skipped: true,
+			Warnings: []string{
+				"skipped annotate: rebase replay created this commit; post-rewrite will remap attribution",
+			},
+		}, nil
+	}
+	// A fast-forward brings commits made in another clone or on the forge.
+	// This clone has no evidence for them, and pre-push would share a
+	// guessed note that conflicts with the note from their author or the
+	// forge workflow.
+	if fastForward {
+		return AnnotateResult{
+			Commit:  head,
+			Skipped: true,
+			Warnings: []string{
+				"skipped annotate: HEAD fast-forwarded to existing commits; fetch refs/notes/attributed for their attribution",
+			},
+		}, nil
+	}
+	state, err := dataStore.ReadState()
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	records, warnings, err := dataStore.ReadCheckpoints()
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	if state.LastAnnotatedCommit != "" {
+		if err := requireAttributionNote(repo, state.LastAnnotatedCommit); err != nil {
+			return AnnotateResult{}, err
+		}
+	}
+	if state.LastAnnotatedCommit == head {
+		if err := repo.ProtectBlobs(retainedBlobs(records, state, model.Checkpoint{})); err != nil {
+			return AnnotateResult{}, fmt.Errorf("compact retained snapshots: %w", err)
+		}
+		return AnnotateResult{Commit: head, Noop: true, Warnings: warnings}, nil
+	}
+	parents, err := repo.Parents(head)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	parent := ""
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	if state.LastAnnotatedCommit != "" && state.LastAnnotatedCommit != parent {
+		return AnnotateResult{}, fmt.Errorf("commit gap or divergent history: last annotated %s, HEAD parent %s", state.LastAnnotatedCommit, parent)
+	}
+	// A parent note fetched after HEAD moved, such as the forge note for a
+	// pulled commit, continues attribution even though the boundary is empty.
+	if state.LastAnnotatedCommit == "" && parent != "" && annotationBoundary(repo, parent) == "" {
+		warnings = append(warnings, "initializing attribution on a repository with existing history")
+	}
+
+	selection, err := selectRecords(records, state, branchRef, parent, head)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	active := selection.Active
+	carry := selection.Carry
+	parkedCount := 0
+	for _, count := range selection.Parked {
+		parkedCount += count
+	}
+	if parkedCount > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"parked %d checkpoints in %d unrelated branch contexts; they stay protected and resume when their branch and base return",
+			parkedCount, len(selection.Parked)))
+	}
+	changes, err := repo.Changes(head, parent)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	changedByPath := make(map[string]gitcmd.Change, len(changes))
+	for _, change := range changes {
+		changedByPath[change.Path] = change
+	}
+	allRecords := make([]model.Checkpoint, 0, len(active)+len(carry))
+	allRecords = append(allRecords, active...)
+	allRecords = append(allRecords, carry...)
+	paths := collectPaths(allRecords, state, changedByPath)
+	note := model.Note{
+		Version: model.NoteVersion,
+		Files:   map[string]model.NoteFile{},
+	}
+	sessions := sessionMetrics{}
+	foldSessionUsage(sessions, active)
+	nextPending := map[string]model.PendingFile{}
+	identity, err := commitIdentity(repo, head)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	// contentFallback covers content no checkpoint explains. On a merge it
+	// stays untracked, including for the pending worktree projection: the
+	// merge result must not become human attribution on the next commit.
+	contentFallback := model.Attribution{Author: model.AuthorHuman, Identity: identity}
+	if len(parents) > 1 {
+		contentFallback = model.Attribution{Author: model.AuthorUntracked}
+		warnings = append(warnings, "merge commit uses first-parent attribution; unmatched content is untracked")
+	}
+
+	// A large merge touches hundreds of paths. Batched lookups keep the
+	// number of Git processes flat; each prefetch is only a cache, so a
+	// failed one leaves the paths to their own Git commands.
+	defer repo.StartBatch()()
+	treePaths := append([]string(nil), paths...)
+	for _, change := range changes {
+		if change.OldPath != "" {
+			treePaths = append(treePaths, change.OldPath)
+		}
+	}
+	if parent != "" {
+		_ = repo.PrefetchBlobIDs(parent, treePaths)
+	}
+	_ = repo.PrefetchBlobIDs(head, paths)
+	repo.PrefetchIgnored(paths)
+	finder := notes.NewFinder(repo)
+	for _, path := range paths {
+		change, changed := changedByPath[path]
+		sourcePath := path
+		if changed && change.OldPath != "" {
+			sourcePath = change.OldPath
+		}
+		initialPath := sourcePath
+		if _, ok := state.Pending.Files[path]; ok {
+			initialPath = path
+		}
+		initial, initialWarnings, err := initialSnapshotWith(repo, finder, state, parent, initialPath)
+		warnings = append(warnings, initialWarnings...)
+		if err != nil {
+			if !errors.Is(err, errUnsupportedBase) {
+				return AnnotateResult{}, fmt.Errorf("initialize %s: %w", path, err)
+			}
+			warnings = append(warnings, fmt.Sprintf("base content for %s is unsupported: %v", path, err))
+			initial = engine.Snapshot{}
+		}
+		transitions, err := transitionsFor(repo, active, sourcePath, path, identity)
+		if err != nil {
+			return AnnotateResult{}, fmt.Errorf("replay %s: %w", path, err)
+		}
+		replayed, transitionStats, err := engine.ReplayWithStats(initial, transitions)
+		if err != nil {
+			return AnnotateResult{}, fmt.Errorf("replay %s: %w", path, err)
+		}
+		addTransitionSessionMetrics(sessions, transitionStats)
+
+		committed := replayed
+		if changed {
+			if change.Status == 'D' {
+				committed = engine.Snapshot{}
+			} else {
+				blob, exists, err := repo.BlobID(head, path)
+				if err != nil {
+					return AnnotateResult{}, err
+				}
+				if !exists {
+					return AnnotateResult{}, fmt.Errorf("changed path %s is missing from commit", path)
+				}
+				content, err := repo.ReadBlob(blob)
+				if err != nil {
+					if errors.Is(err, gitcmd.ErrOutputLimit) {
+						warnings = append(warnings, fmt.Sprintf("skipped unsupported path %s: %v", path, err))
+						continue
+					}
+					return AnnotateResult{}, err
+				}
+				committed, err = engine.Project(replayed, content, contentFallback)
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("skipped unsupported path %s: %v", path, err))
+				} else {
+					ranges, err := committed.Ranges()
+					if err != nil {
+						return AnnotateResult{}, err
+					}
+					note.Files[path] = model.NoteFile{Blob: blob, Ranges: ranges}
+					addCommittedSessionMetrics(sessions, committed)
+				}
+			}
+		}
+
+		carryTransitions, err := transitionsFor(repo, carry, path, path, identity)
+		if err != nil {
+			return AnnotateResult{}, fmt.Errorf("carry pending %s: %w", path, err)
+		}
+		pendingSource, err := engine.Replay(replayed, carryTransitions)
+		if err != nil {
+			return AnnotateResult{}, fmt.Errorf("carry pending %s: %w", path, err)
+		}
+		worktreeContent, exists, normalized, readErr := repo.WorktreeFile(path)
+		if readErr != nil {
+			warnings = append(warnings, fmt.Sprintf("cannot retain pending path %s: %v", path, readErr))
+			continue
+		}
+		if !exists {
+			continue
+		}
+		worktree, err := engine.Project(pendingSource, worktreeContent, contentFallback)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("cannot attribute pending path %s: %v", path, err))
+			continue
+		}
+		if changed && snapshotsEqual(worktree, committed) {
+			continue
+		}
+		if !changed && snapshotsEqual(worktree, initial) && len(transitions) == 0 {
+			if pending, ok := state.Pending.Files[sourcePath]; ok {
+				nextPending[normalized] = pending
+			}
+			continue
+		}
+		oid, err := repo.HashBytes(worktreeContent)
+		if err != nil {
+			return AnnotateResult{}, err
+		}
+		ranges, err := worktree.Ranges()
+		if err != nil {
+			return AnnotateResult{}, err
+		}
+		nextPending[normalized] = model.PendingFile{Blob: oid, Ranges: ranges}
+	}
+
+	note.Sessions = materializeSessionMetrics(sessions)
+	data, err := notes.Encode(note)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	nextState := state
+	nextState.LastAnnotatedCommit = head
+	nextState.Lanes = advanceLanes(state.Lanes, selection)
+	nextState.Pending = model.PendingState{BaseCommit: head, Files: nextPending}
+	if err := dataStore.CheckStateWrite(nextState); err != nil {
+		return AnnotateResult{}, err
+	}
+	protected := retainedBlobs(records, state, model.Checkpoint{})
+	protected = append(protected, pendingBlobs(nextState)...)
+	if err := repo.ProtectBlobs(protected); err != nil {
+		return AnnotateResult{}, fmt.Errorf("protect pending snapshots: %w", err)
+	}
+	if err := repo.WriteNote(head, data); err != nil {
+		return AnnotateResult{}, err
+	}
+	if err := dataStore.WriteState(nextState); err != nil {
+		return AnnotateResult{}, err
+	}
+	// The retention ref keeps blobs of every unconsumed record, which
+	// includes parked lanes from other branches.
+	if err := repo.ProtectBlobs(retainedBlobs(records, nextState, model.Checkpoint{})); err != nil {
+		return AnnotateResult{}, fmt.Errorf("compact retained snapshots: %w", err)
+	}
+	return AnnotateResult{
+		Commit:            head,
+		Files:             len(note.Files),
+		ParkedCheckpoints: parkedCount,
+		Warnings:          warnings,
+	}, nil
+}
+
+// AnnotateDroppingStranded explicitly discards unreachable parked lanes
+// before annotating. Annotation no longer blocks on foreign lanes, so the
+// flag exists for operators who want stranded evidence gone in the same
+// step instead of parking it.
+func AnnotateDroppingStranded(repo *gitcmd.Repo) (AnnotateResult, error) {
+	return annotateDropping(repo, false)
+}
+
+// AnnotateDroppingParked discards every parked checkpoint, also those whose
+// base a branch still reaches. After many branch switches a queue can hold
+// evidence the user will never return to, and this is the explicit way to
+// clear it without resetting the attributed directory.
+func AnnotateDroppingParked(repo *gitcmd.Repo) (AnnotateResult, error) {
+	return annotateDropping(repo, true)
+}
+
+func annotateDropping(repo *gitcmd.Repo, all bool) (AnnotateResult, error) {
+	result, err := Annotate(repo)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	dropped, err := dropParkedCheckpoints(repo, all)
+	if err != nil {
+		return AnnotateResult{}, err
+	}
+	if dropped == 0 {
+		return result, nil
+	}
+	if _, err = Annotate(repo); err != nil {
+		return AnnotateResult{}, fmt.Errorf(
+			"annotate after dropping %d stranded checkpoints: %w",
+			dropped,
+			err,
+		)
+	}
+	warning := fmt.Sprintf("dropped %d stranded checkpoints with bases no branch can reach", dropped)
+	if all {
+		warning = fmt.Sprintf("dropped %d parked checkpoints from other branch contexts", dropped)
+	}
+	result.Warnings = append([]string{warning}, withoutParkedWarnings(result.Warnings)...)
+	result.ParkedCheckpoints = 0
+	result.DroppedCheckpoints = dropped
+	return result, nil
+}
+
+func withoutParkedWarnings(warnings []string) []string {
+	result := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		if !strings.HasPrefix(warning, "parked ") {
+			result = append(result, warning)
+		}
+	}
+	return result
+}
+
+// dropParkedCheckpoints drops unconsumed checkpoints outside the current
+// branch context. Without all, every one of them must be stranded.
+func dropParkedCheckpoints(repo *gitcmd.Repo, all bool) (int, error) {
+	dataStore := store.New(repo.GitDir)
+	held, err := lock.Acquire(dataStore.LockPath(), lockTimeout)
+	if err != nil {
+		return 0, err
+	}
+	defer held.Release()
+	records, _, err := dataStore.ReadCheckpoints()
+	if err != nil {
+		return 0, err
+	}
+	state, err := dataStore.ReadState()
+	if err != nil {
+		return 0, err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return 0, err
+	}
+	branchRef, _, err := repo.CurrentBranchRef()
+	if err != nil {
+		return 0, err
+	}
+	parents, err := repo.Parents(head)
+	if err != nil {
+		return 0, err
+	}
+	parent := ""
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	reachable := cachedReachable(repo)
+	sequences := map[uint64]bool{}
+	for _, record := range records {
+		if checkpointConsumed(record, state) ||
+			recordMatchesContext(record, branchRef, parent) ||
+			recordMatchesContext(record, branchRef, head) {
+			continue
+		}
+		if all {
+			sequences[record.Seq] = true
+			continue
+		}
+		if record.BaseCommit == "" {
+			// Recorded before the first commit, so no branch can ever
+			// reach it once HEAD has a parent.
+			sequences[record.Seq] = true
+			continue
+		}
+		alive, err := reachable(record.BaseCommit)
+		if err != nil {
+			return 0, fmt.Errorf("check checkpoint %d base reachability: %w", record.Seq, err)
+		}
+		if alive {
+			return 0, fmt.Errorf("a local or remote-tracking branch still reaches the base, "+
+				"so consume or delete that branch first: %w",
+				&unrelatedCheckpointError{Seq: record.Seq, Base: record.BaseCommit})
+		}
+		sequences[record.Seq] = true
+	}
+	dropped, err := dataStore.DropCheckpointRecords(sequences)
+	if err != nil {
+		return 0, fmt.Errorf("drop parked checkpoints: %w", err)
+	}
+	return dropped, nil
+}
+
+type unrelatedCheckpointError struct {
+	Seq  uint64
+	Base string
+}
+
+func (err *unrelatedCheckpointError) Error() string {
+	return fmt.Sprintf("checkpoint %d belongs to unrelated base commit %q", err.Seq, err.Base)
+}
+
+// UnrelatedCheckpoint returns details from a failed strict annotation.
+func UnrelatedCheckpoint(err error) (uint64, string, bool) {
+	var unrelated *unrelatedCheckpointError
+	if !errors.As(err, &unrelated) {
+		return 0, "", false
+	}
+	return unrelated.Seq, unrelated.Base, true
+}
+
+type laneContext struct {
+	BranchRef string
+	LaneID    string
+}
+
+// laneSelection splits unconsumed records into active and carry contexts,
+// plus parked contexts belonging to other branches or bases.
+type laneSelection struct {
+	Active    []model.Checkpoint
+	Carry     []model.Checkpoint
+	Parked    map[laneContext]int
+	Consumed  map[laneContext]uint64
+	ActiveSeq uint64
+	CarrySeq  uint64
+}
+
+func selectRecords(records []model.Checkpoint, state model.State, branchRef, parent, head string) (laneSelection, error) {
+	selection := laneSelection{
+		Parked:   map[laneContext]int{},
+		Consumed: map[laneContext]uint64{},
+	}
+	carryStarted := false
+	for _, record := range records {
+		if checkpointConsumed(record, state) {
+			continue
+		}
+		switch {
+		case recordMatchesContext(record, branchRef, parent):
+			if carryStarted {
+				return laneSelection{}, fmt.Errorf("checkpoint %d for parent appears after a HEAD checkpoint", record.Seq)
+			}
+			selection.Active = append(selection.Active, record)
+			selection.ActiveSeq = record.Seq
+			recordConsumedContext(selection.Consumed, record)
+		case recordMatchesContext(record, branchRef, head):
+			carryStarted = true
+			selection.Carry = append(selection.Carry, record)
+			selection.CarrySeq = record.Seq
+			recordConsumedContext(selection.Consumed, record)
+		default:
+			context := laneContext{BranchRef: record.BranchRef, LaneID: checkpointLaneID(record)}
+			selection.Parked[context]++
+		}
+	}
+	return selection, nil
+}
+
+func recordConsumedContext(consumed map[laneContext]uint64, record model.Checkpoint) {
+	context := laneContext{BranchRef: record.BranchRef, LaneID: checkpointLaneID(record)}
+	if consumed[context] < record.Seq {
+		consumed[context] = record.Seq
+	}
+}
+
+func recordMatchesContext(record model.Checkpoint, branchRef, base string) bool {
+	return record.BaseCommit == base &&
+		(recordUsesLegacyContext(record) || record.BranchRef == branchRef)
+}
+
+func recordUsesLegacyContext(record model.Checkpoint) bool {
+	return record.Version == model.CheckpointVersionV1 ||
+		model.IsLegacyCheckpointLaneID(record.LaneID)
+}
+
+// advanceLanes records per-context consumption without mutating prior state.
+func advanceLanes(
+	lanes map[string]map[string]uint64,
+	selection laneSelection,
+) map[string]map[string]uint64 {
+	next := cloneLanes(lanes)
+	for context, consumed := range selection.Consumed {
+		if next[context.BranchRef] == nil {
+			next[context.BranchRef] = map[string]uint64{}
+		}
+		if next[context.BranchRef][context.LaneID] < consumed {
+			next[context.BranchRef][context.LaneID] = consumed
+		}
+	}
+	return next
+}
+
+func cloneLanes(lanes map[string]map[string]uint64) map[string]map[string]uint64 {
+	next := make(map[string]map[string]uint64, len(lanes)+1)
+	for branch, bases := range lanes {
+		next[branch] = make(map[string]uint64, len(bases))
+		for base, consumed := range bases {
+			next[branch][base] = consumed
+		}
+	}
+	return next
+}
+
+// cachedReachable memoizes branch containment per base commit so a large
+// stranded log costs one Git call per distinct base.
+func cachedReachable(repo *gitcmd.Repo) func(string) (bool, error) {
+	cache := map[string]bool{}
+	scanner := repo.NewBranchScanner()
+	return func(commit string) (bool, error) {
+		if value, ok := cache[commit]; ok {
+			return value, nil
+		}
+		value, err := scanner.AnyBranchContains(commit)
+		if err != nil {
+			return false, err
+		}
+		cache[commit] = value
+		return value, nil
+	}
+}
+
+func collectPaths(records []model.Checkpoint, state model.State, changes map[string]gitcmd.Change) []string {
+	paths := map[string]bool{}
+	for path := range state.Pending.Files {
+		paths[path] = true
+	}
+	for _, record := range records {
+		for _, file := range record.Files {
+			paths[file.Path] = true
+		}
+	}
+	for path := range changes {
+		paths[path] = true
+	}
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func initialSnapshot(repo *gitcmd.Repo, state model.State, parent, path string) (engine.Snapshot, []string, error) {
+	return initialSnapshotWith(repo, notes.NewFinder(repo), state, parent, path)
+}
+
+// initialSnapshotWith is initialSnapshot with a Finder shared across the
+// paths of one annotation.
+func initialSnapshotWith(
+	repo *gitcmd.Repo,
+	finder *notes.Finder,
+	state model.State,
+	parent, path string,
+) (engine.Snapshot, []string, error) {
+	if pending, ok := state.Pending.Files[path]; ok {
+		content, err := repo.ReadBlob(pending.Blob)
+		if err != nil {
+			return engine.Snapshot{}, nil, err
+		}
+		snapshot, err := engine.NewSnapshot(content, pending.Ranges)
+		return snapshot, nil, err
+	}
+	if parent == "" {
+		return engine.Snapshot{}, nil, nil
+	}
+	blob, exists, err := repo.BlobID(parent, path)
+	if err != nil {
+		return engine.Snapshot{}, nil, err
+	}
+	if !exists {
+		return engine.Snapshot{}, nil, nil
+	}
+	content, err := repo.ReadBlob(blob)
+	if err != nil {
+		if errors.Is(err, gitcmd.ErrOutputLimit) {
+			return engine.Snapshot{}, nil, fmt.Errorf("%w: %v", errUnsupportedBase, err)
+		}
+		return engine.Snapshot{}, nil, err
+	}
+	note, found, warnings, err := finder.Find(parent, path, blob)
+	if err != nil {
+		return engine.Snapshot{}, warnings, err
+	}
+	if found {
+		snapshot, err := engine.NewSnapshot(content, note.Files[path].Ranges)
+		if err != nil {
+			return engine.Snapshot{}, warnings, fmt.Errorf("%w: %v", errUnsupportedBase, err)
+		}
+		return snapshot, warnings, nil
+	}
+	ranges, err := engine.UniformRanges(content, model.Attribution{Author: model.AuthorUntracked})
+	if err != nil {
+		return engine.Snapshot{}, warnings, fmt.Errorf("%w: %v", errUnsupportedBase, err)
+	}
+	snapshot, err := engine.NewSnapshot(content, ranges)
+	return snapshot, warnings, err
+}
+
+// commitIdentity resolves the human identity recorded for lines this commit
+// introduces. It comes from the commit author, so anyone can reproduce it
+// with git log. An identity that cannot be normalized stays empty.
+func commitIdentity(repo *gitcmd.Repo, commit string) (string, error) {
+	name, email, err := repo.CommitAuthor(commit)
+	if err != nil {
+		return "", fmt.Errorf("resolve commit author for %s: %w", commit, err)
+	}
+	return model.NormalizeIdentity(name, email), nil
+}
+
+func transitionsFor(
+	repo *gitcmd.Repo,
+	records []model.Checkpoint,
+	sourcePath,
+	targetPath,
+	identity string,
+) ([]engine.Transition, error) {
+	var transitions []engine.Transition
+	for _, record := range records {
+		if record.Type != model.AuthorHuman && record.Type != model.AuthorAI {
+			return nil, fmt.Errorf("checkpoint %d has unsupported author %q", record.Seq, record.Type)
+		}
+		var selected *model.Snapshot
+		for _, file := range record.Files {
+			if file.Path == targetPath {
+				value := file
+				selected = &value
+				break
+			}
+			if file.Path == sourcePath {
+				value := file
+				selected = &value
+			}
+		}
+		if selected == nil {
+			continue
+		}
+		var content []byte
+		var err error
+		if selected.Exists {
+			content, err = repo.ReadBlob(selected.Blob)
+			if err != nil {
+				return nil, err
+			}
+		}
+		attr := model.Attribution{Author: record.Type}
+		if record.Type == model.AuthorAI {
+			attr.Agent = record.Agent
+			attr.Model = record.Model
+			attr.Session = record.Session
+			attr.TS = record.TS
+		} else {
+			attr.Identity = identity
+		}
+		transitions = append(transitions, engine.Transition{Content: content, Attribution: attr})
+	}
+	return transitions, nil
+}
+
+// foldSessionUsage sums the token usage of the agent turns whose
+// checkpoints this annotation consumes. One assistant message can serve
+// several checkpoints in a turn, so a usage block with a message id counts
+// once per session; blocks without an id cannot be deduplicated and count
+// each time. Records without usage contribute nothing, so a checkpoint
+// written before a transcript named usage stays honestly silent.
+func foldSessionUsage(sessions sessionMetrics, records []model.Checkpoint) {
+	seen := map[string]bool{}
+	for _, record := range records {
+		if record.Usage == nil || record.Type != model.AuthorAI || record.Session == "" {
+			continue
+		}
+		attribution := model.Attribution{
+			Author:  model.AuthorAI,
+			Agent:   record.Agent,
+			Model:   record.Model,
+			Session: record.Session,
+			TS:      record.TS,
+		}
+		session := ensureSession(sessions, attribution)
+		if record.Usage.MsgID != "" {
+			key := model.NoteSessionKey(record.Agent, record.Session) +
+				model.NoteSessionSeparator + record.Usage.MsgID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		session.TokensIn = cappedUsageSum(session.TokensIn, record.Usage.TokensIn)
+		session.TokensOut = cappedUsageSum(session.TokensOut, record.Usage.TokensOut)
+		session.CacheRead = cappedUsageSum(session.CacheRead, record.Usage.CacheRead)
+		session.CacheWrite = cappedUsageSum(session.CacheWrite, record.Usage.CacheWrite)
+	}
+}
+
+func cappedUsageSum(current, value uint64) uint64 {
+	if current >= model.MaxCheckpointUsageTokens ||
+		value > model.MaxCheckpointUsageTokens-current {
+		return model.MaxCheckpointUsageTokens
+	}
+	return current + value
+}
+
+func addTransitionSessionMetrics(sessions sessionMetrics, stats []engine.TransitionStats) {
+	for _, value := range stats {
+		if value.Attribution.Author == model.AuthorAI && value.Attribution.Session != "" {
+			session := ensureSession(sessions, value.Attribution)
+			session.Added += value.Added
+			session.Deleted += value.Deleted
+		}
+		for _, attribution := range value.Overridden {
+			if attribution.Session != "" {
+				ensureSession(sessions, attribution).Overridden++
+			}
+		}
+	}
+}
+
+func addCommittedSessionMetrics(sessions sessionMetrics, snapshot engine.Snapshot) {
+	for _, attribution := range snapshot.Attributions {
+		if attribution.Session == "" {
+			continue
+		}
+		switch attribution.Author {
+		case model.AuthorAI:
+			ensureSession(sessions, attribution).Accepted++
+		}
+	}
+}
+
+func ensureSession(sessions sessionMetrics, attribution model.Attribution) *model.NoteSession {
+	key := model.NoteSessionKey(attribution.Agent, attribution.Session)
+	session := sessions[key]
+	if session == nil {
+		session = &model.NoteSession{}
+	}
+	if session.Agent == "" {
+		session.Agent = attribution.Agent
+	}
+	if session.Model == "" {
+		session.Model = attribution.Model
+	}
+	if attribution.TS != "" {
+		if session.FirstTS == "" || timestampBefore(attribution.TS, session.FirstTS) {
+			session.FirstTS = attribution.TS
+		}
+		if session.LastTS == "" || timestampBefore(session.LastTS, attribution.TS) {
+			session.LastTS = attribution.TS
+		}
+	}
+	sessions[key] = session
+	return session
+}
+
+func timestampBefore(left, right string) bool {
+	leftTime, leftErr := time.Parse(time.RFC3339Nano, left)
+	rightTime, rightErr := time.Parse(time.RFC3339Nano, right)
+	if leftErr != nil || rightErr != nil {
+		return left < right
+	}
+	return leftTime.Before(rightTime)
+}
+
+func materializeSessionMetrics(sessions sessionMetrics) map[string]model.NoteSession {
+	result := make(map[string]model.NoteSession, len(sessions))
+	for key, value := range sessions {
+		session := *value
+		if session.Accepted == 0 && session.Overridden == 0 {
+			session.Added = 0
+			session.Deleted = 0
+			session.TokensIn = 0
+			session.TokensOut = 0
+			session.CacheRead = 0
+			session.CacheWrite = 0
+		}
+		result[key] = session
+	}
+	return result
+}
+
+func snapshotsEqual(left, right engine.Snapshot) bool {
+	if len(left.Lines) != len(right.Lines) {
+		return false
+	}
+	for i := range left.Lines {
+		if left.Lines[i] != right.Lines[i] || left.Attributions[i] != right.Attributions[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func pendingBlobs(state model.State) []string {
+	result := make([]string, 0, len(state.Pending.Files))
+	for _, file := range state.Pending.Files {
+		result = append(result, file.Blob)
+	}
+	return result
+}
+
+func requireAttributionNote(repo *gitcmd.Repo, commit string) error {
+	data, found, err := repo.ReadNote(commit)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("state marks %s annotated but its attribution note is missing", commit)
+	}
+	if _, err := notes.Decode(data); err != nil {
+		return fmt.Errorf("state marks %s annotated but its attribution note is invalid: %w", commit, err)
+	}
+	return nil
+}
+
+// BlameLine is one rendered file line.
+type BlameLine struct {
+	Number      int               `json:"number"`
+	Content     string            `json:"content"`
+	Attribution model.Attribution `json:"attribution"`
+}
+
+// BlameResult is attribution for one committed file.
+type BlameResult struct {
+	Version  int                          `json:"version"`
+	File     string                       `json:"file"`
+	Blob     string                       `json:"blob"`
+	Commit   string                       `json:"commit"`
+	Lines    []BlameLine                  `json:"lines"`
+	Sessions map[string]model.NoteSession `json:"sessions,omitempty"`
+	Warnings []string                     `json:"warnings,omitempty"`
+}
+
+// BlameCollection is attribution for every file recorded on HEAD.
+type BlameCollection struct {
+	Commit   string
+	Files    []BlameResult
+	Sessions map[string]model.NoteSession
+	Warnings []string
+}
+
+// BlameHead reads all files from the attribution note attached to HEAD.
+func BlameHead(repo *gitcmd.Repo) (BlameCollection, error) {
+	head, note, err := headNote(repo)
+	if err != nil {
+		return BlameCollection{}, err
+	}
+	if len(note.Files) > maxBlameCollectionFiles {
+		return BlameCollection{}, fmt.Errorf(
+			"HEAD attribution note has %d files, limit is %d",
+			len(note.Files),
+			maxBlameCollectionFiles,
+		)
+	}
+	paths := make([]string, 0, len(note.Files))
+	for path := range note.Files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	blobs, err := preflightBlameFiles(repo, head, paths, note)
+	if err != nil {
+		return BlameCollection{}, err
+	}
+	result := BlameCollection{Commit: head, Sessions: note.Sessions}
+	for index, path := range paths {
+		file, err := blameNotedFile(repo, head, path, blobs[index], note.Files[path], note.Sessions)
+		if err != nil {
+			return BlameCollection{}, fmt.Errorf("blame %q: %w", path, err)
+		}
+		result.Files = append(result.Files, file)
+	}
+	return result, nil
+}
+
+// blameCandidates resolves a raw user-supplied path into the candidate
+// paths it can name: the path resolved against the current working
+// directory first, then the repository-root-relative reading, matching
+// Git's own argument handling. An absolute path names exactly one file.
+func blameCandidates(repo *gitcmd.Repo, rawPath string) ([]string, error) {
+	if filepath.IsAbs(filepath.FromSlash(rawPath)) {
+		normalized, err := repo.NormalizeWorktreePath(rawPath)
+		if err != nil {
+			return nil, err
+		}
+		return []string{normalized}, nil
+	}
+	var candidates []string
+	cwdRelative, ok, err := repo.CwdRelative(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		candidates = append(candidates, cwdRelative)
+	}
+	normalized, err := repo.NormalizeWorktreePath(rawPath)
+	if err != nil {
+		if len(candidates) > 0 {
+			return candidates, nil
+		}
+		return nil, err
+	}
+	if len(candidates) == 0 || candidates[len(candidates)-1] != normalized {
+		candidates = append(candidates, normalized)
+	}
+	return candidates, nil
+}
+
+// BlameHeadFile reads one file from the attribution note attached to HEAD.
+func BlameHeadFile(repo *gitcmd.Repo, path string) (BlameResult, error) {
+	head, note, err := headNote(repo)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	candidates, err := blameCandidates(repo, path)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	for _, candidate := range candidates {
+		file, found := note.Files[candidate]
+		if !found {
+			continue
+		}
+		blobs, err := preflightBlameFiles(repo, head, []string{candidate}, note)
+		if err != nil {
+			return BlameResult{}, err
+		}
+		result, err := blameNotedFile(repo, head, candidate, blobs[0], file, note.Sessions)
+		if err != nil {
+			return BlameResult{}, fmt.Errorf("blame %q: %w", candidate, err)
+		}
+		return result, nil
+	}
+	if len(candidates) > 1 {
+		return BlameResult{}, fmt.Errorf("file %q is not attributed on HEAD (tried %q against the working directory, then %q against the repository root)", path, candidates[0], candidates[1])
+	}
+	return BlameResult{}, fmt.Errorf("file %q is not attributed on HEAD", candidates[0])
+}
+
+func headNote(repo *gitcmd.Repo) (string, model.Note, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return "", model.Note{}, err
+	}
+	if head == "" {
+		return "", model.Note{}, errors.New("cannot blame an unborn repository")
+	}
+	data, found, err := repo.ReadNote(head)
+	if err != nil {
+		return "", model.Note{}, err
+	}
+	if !found {
+		return "", model.Note{}, errors.New("HEAD has no attribution note; run git-attributed annotate")
+	}
+	note, err := notes.Decode(data)
+	if err != nil {
+		return "", model.Note{}, fmt.Errorf("decode HEAD attribution note: %w", err)
+	}
+	return head, note, nil
+}
+
+func preflightBlameFiles(repo *gitcmd.Repo, head string, paths []string, note model.Note) ([]string, error) {
+	totalLines := 0
+	var totalBytes int64
+	blobs := make([]string, 0, len(paths))
+	for _, path := range paths {
+		file := note.Files[path]
+		blob, exists, err := repo.BlobID(head, path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect %q: %w", path, err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("attributed path %q is missing from HEAD", path)
+		}
+		if blob != file.Blob {
+			return nil, fmt.Errorf("attribution blob for %q does not match HEAD", path)
+		}
+		blobs = append(blobs, blob)
+		size, err := repo.BlobSize(blob)
+		if err != nil {
+			return nil, fmt.Errorf("inspect %q: %w", path, err)
+		}
+		totalBytes += size
+		if totalBytes > maxBlameCollectionBytes {
+			return nil, fmt.Errorf(
+				"HEAD attribution content exceeds %d bytes",
+				maxBlameCollectionBytes,
+			)
+		}
+		if len(file.Ranges) > 0 {
+			totalLines += file.Ranges[len(file.Ranges)-1].End
+		}
+		if totalLines > maxBlameCollectionLines {
+			return nil, fmt.Errorf(
+				"HEAD attribution has more than %d lines",
+				maxBlameCollectionLines,
+			)
+		}
+	}
+	return blobs, nil
+}
+
+func blameNotedFile(
+	repo *gitcmd.Repo,
+	head, path, blob string,
+	file model.NoteFile,
+	sessions map[string]model.NoteSession,
+) (BlameResult, error) {
+	normalized, err := repo.NormalizeWorktreePath(path)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	if normalized != path {
+		return BlameResult{}, fmt.Errorf("attribution path %q is not normalized", path)
+	}
+	content, err := repo.ReadBlob(blob)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	snapshot, err := engine.NewSnapshot(content, file.Ranges)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	return renderBlameResult(head, path, blob, snapshot, sessions, nil), nil
+}
+
+// Blame reads line attribution for path at HEAD.
+func Blame(repo *gitcmd.Repo, path string) (BlameResult, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return BlameResult{}, err
+	}
+	if head == "" {
+		return BlameResult{}, errors.New("cannot blame an unborn repository")
+	}
+	candidates, err := blameCandidates(repo, path)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	for _, candidate := range candidates {
+		result, err := blamePath(repo, head, candidate)
+		if err == nil {
+			return result, nil
+		}
+		if !errors.Is(err, errBlamePathMissing) {
+			return BlameResult{}, err
+		}
+	}
+	if len(candidates) > 1 {
+		return BlameResult{}, fmt.Errorf("path %q does not exist at HEAD (tried %q against the working directory, then %q against the repository root)", path, candidates[0], candidates[1])
+	}
+	return BlameResult{}, fmt.Errorf("path %q does not exist at HEAD", candidates[0])
+}
+
+var errBlamePathMissing = errors.New("blame path is missing at HEAD")
+
+func blamePath(repo *gitcmd.Repo, head, path string) (BlameResult, error) {
+	blob, exists, err := repo.BlobID(head, path)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	if !exists {
+		return BlameResult{}, errBlamePathMissing
+	}
+	content, err := repo.ReadBlob(blob)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	note, found, warnings, err := notes.FindFile(repo, head, path, blob)
+	if err != nil {
+		return BlameResult{}, err
+	}
+	var snapshot engine.Snapshot
+	var sessions map[string]model.NoteSession
+	if found {
+		snapshot, err = engine.NewSnapshot(content, note.Files[path].Ranges)
+		sessions = note.Sessions
+	} else {
+		var ranges []model.Range
+		ranges, err = engine.UniformRanges(content, model.Attribution{Author: model.AuthorUntracked})
+		if err == nil {
+			snapshot, err = engine.NewSnapshot(content, ranges)
+		}
+	}
+	if err != nil {
+		return BlameResult{}, err
+	}
+	return renderBlameResult(head, path, blob, snapshot, sessions, warnings), nil
+}
+
+func renderBlameResult(
+	head, path, blob string,
+	snapshot engine.Snapshot,
+	sessions map[string]model.NoteSession,
+	warnings []string,
+) BlameResult {
+	lines := make([]BlameLine, len(snapshot.Lines))
+	for i, line := range snapshot.Lines {
+		line = strings.TrimSuffix(line, "\r\n")
+		line = strings.TrimSuffix(line, "\n")
+		lines[i] = BlameLine{Number: i + 1, Content: line, Attribution: snapshot.Attributions[i]}
+	}
+	return BlameResult{
+		Version:  model.NoteVersion,
+		File:     path,
+		Blob:     blob,
+		Commit:   head,
+		Lines:    lines,
+		Sessions: sessions,
+		Warnings: warnings,
+	}
+}
+
+// StatusResult reports repository attribution state.
+type StatusResult struct {
+	Version              int      `json:"version"`
+	Head                 string   `json:"head,omitempty"`
+	LastAnnotatedCommit  string   `json:"last_annotated_commit,omitempty"`
+	AnnotationPending    bool     `json:"annotation_pending"`
+	PendingCheckpoints   int      `json:"pending_checkpoints"`
+	PendingFiles         int      `json:"pending_files"`
+	RetainedSnapshots    int      `json:"retained_snapshots"`
+	UnrelatedCheckpoints int      `json:"unrelated_checkpoints"`
+	StrandedCheckpoints  int      `json:"stranded_checkpoints"`
+	BlockedCheckpoints   int      `json:"blocked_checkpoints"`
+	RecommendedAction    string   `json:"recommended_action,omitempty"`
+	Warnings             []string `json:"warnings,omitempty"`
+}
+
+// Status reads current state without changing it.
+func Status(repo *gitcmd.Repo) (StatusResult, error) {
+	dataStore := store.New(repo.GitDir)
+	state, err := dataStore.ReadState()
+	if err != nil {
+		return StatusResult{}, err
+	}
+	records, warnings, err := dataStore.ReadCheckpoints()
+	if err != nil {
+		return StatusResult{}, err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return StatusResult{}, err
+	}
+	branchRef, _, err := repo.CurrentBranchRef()
+	if err != nil {
+		return StatusResult{}, err
+	}
+	retained, err := repo.ProtectedBlobCount()
+	if err != nil {
+		return StatusResult{}, err
+	}
+	pending := 0
+	for _, record := range records {
+		if !checkpointConsumed(record, state) {
+			pending++
+		}
+	}
+	if head != "" && head != state.LastAnnotatedCommit {
+		warnings = append(warnings, "HEAD is not annotated")
+	}
+	annotationPending := head != "" && head != state.LastAnnotatedCommit
+	if state.LastAnnotatedCommit != "" {
+		if err := requireAttributionNote(repo, state.LastAnnotatedCommit); err != nil {
+			warnings = append(warnings, err.Error())
+			if state.LastAnnotatedCommit == head {
+				annotationPending = true
+			}
+		}
+	}
+	preview, previewErr := previewRecovery(repo, records, state, branchRef, head, nil)
+	recommendedAction := preview.RecommendedAction
+	if previewErr != nil {
+		warnings = append(warnings, "cannot inspect stranded checkpoints: "+previewErr.Error())
+		recommendedAction = "git-attributed recover"
+	} else if recommendedAction == "" && annotationPending {
+		recommendedAction = "git-attributed annotate"
+	}
+	return StatusResult{
+		Version:              model.StateVersion,
+		Head:                 head,
+		LastAnnotatedCommit:  state.LastAnnotatedCommit,
+		AnnotationPending:    annotationPending,
+		PendingCheckpoints:   pending,
+		PendingFiles:         len(state.Pending.Files),
+		RetainedSnapshots:    retained,
+		UnrelatedCheckpoints: preview.UnrelatedCheckpoints,
+		StrandedCheckpoints:  preview.StrandedCheckpoints,
+		BlockedCheckpoints:   preview.BlockedCheckpoints,
+		RecommendedAction:    recommendedAction,
+		Warnings:             warnings,
+	}, nil
+}

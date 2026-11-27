@@ -1,0 +1,5 @@
+{
+  "include": ["import_upstream.py", "test_import_upstream.py"],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict"
+}

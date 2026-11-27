@@ -1,0 +1,181 @@
+package app
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+	"unicode"
+
+	"github.com/amichne/attributed/internal/report"
+)
+
+func runStats(env *Env, command *command, args []string) (int, error) {
+	jsonOutput, rest, err := parseJSONFlag(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(env.Stdout, command.usage)
+			return ExitSuccess, nil
+		}
+		return commandUsageError(env, command, err)
+	}
+	from, to, err := parseRevisionRange(rest, command.name)
+	if err != nil {
+		return commandUsageError(env, command, err)
+	}
+	repo, err := discoverForEnv(env)
+	if err != nil {
+		return operationalError(env, command.name, err)
+	}
+	result, err := report.Collect(repo, from, to, 0)
+	if err != nil {
+		return operationalError(env, command.name, err)
+	}
+	if jsonOutput {
+		if err := writeJSON(env, result); err != nil {
+			return operationalError(env, command.name, err)
+		}
+		return ExitSuccess, nil
+	}
+	writeWarnings(env, result.Warnings)
+	writeStatsText(env.Stdout, result)
+	return ExitSuccess, nil
+}
+
+// collectRangeAggregate resolves one optional revision range and gathers
+// its report aggregate.
+func collectRangeAggregate(env *Env, command *command, rangeSpecified bool, rangeValue string) (report.Aggregate, int, error) {
+	rangeArgs := []string(nil)
+	if rangeSpecified {
+		rangeArgs = []string{rangeValue}
+	}
+	from, to, err := parseRevisionRange(rangeArgs, command.name)
+	if err != nil {
+		code, usageErr := commandUsageError(env, command, err)
+		return report.Aggregate{}, code, usageErr
+	}
+	repo, err := discoverForEnv(env)
+	if err != nil {
+		code, operationErr := operationalError(env, command.name, err)
+		return report.Aggregate{}, code, operationErr
+	}
+	aggregate, err := report.Collect(repo, from, to, 0)
+	if err != nil {
+		code, operationErr := operationalError(env, command.name, err)
+		return report.Aggregate{}, code, operationErr
+	}
+	return aggregate, ExitSuccess, nil
+}
+
+func parseRevisionRange(args []string, commandName string) (string, string, error) {
+	if len(args) == 0 {
+		return "", "", nil
+	}
+	if len(args) > 1 {
+		return "", "", fmt.Errorf("%s accepts at most one revision range", commandName)
+	}
+	value := args[0]
+	if value == "" {
+		return "", "", errors.New("revision range must not be empty")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return "", "", errors.New("revision range contains whitespace or a control character")
+		}
+	}
+	if strings.Contains(value, "...") {
+		return "", "", errors.New("revision range must use two dots, not three")
+	}
+	index := strings.Index(value, "..")
+	if index < 0 {
+		return "", value, nil
+	}
+	from, to := value[:index], value[index+2:]
+	if from == "" || to == "" || strings.Contains(to, "..") {
+		return "", "", fmt.Errorf("invalid revision range %q", value)
+	}
+	return from, to, nil
+}
+
+func writeStatsText(out io.Writer, result report.Aggregate) {
+	fmt.Fprintf(out, "Range: %s\n", displayRevisionRange(result.From, result.To))
+	fmt.Fprintf(out, "Commits: %d total, %d annotated\n", result.Commits.Total, result.Commits.Annotated)
+	fmt.Fprintf(out, "Lines: %d\n", result.Totals.Lines)
+	fmt.Fprintf(out, "Human: %d\n", result.Totals.Human)
+	fmt.Fprintf(out, "AI: %d\n", result.Totals.AI)
+	fmt.Fprintf(out, "Untracked: %d\n", result.Totals.Untracked)
+	fmt.Fprintf(out, "Human override: %d\n", result.Totals.HumanOverride)
+
+	fmt.Fprintln(out, "Agents:")
+	for _, agent := range result.Agents {
+		fmt.Fprintf(out, "  %s: %d lines (human %d, AI %d, untracked %d, human override %d)\n",
+			agent.Agent, agent.Lines, agent.Human, agent.AI, agent.Untracked, agent.HumanOverride)
+		for _, model := range agent.Models {
+			fmt.Fprintf(out, "    model %s: %d lines (human %d, AI %d, untracked %d, human override %d)\n",
+				model.Model, model.Lines, model.Human, model.AI, model.Untracked, model.HumanOverride)
+		}
+	}
+
+	fmt.Fprintln(out, "Authors:")
+	for _, author := range result.Authors {
+		fmt.Fprintf(out, "  %s: %d lines (human %d, human override %d)\n",
+			displayIdentity(author.Identity), author.Lines, author.Human, author.HumanOverride)
+	}
+
+	fmt.Fprintln(out, "Sessions:")
+	for _, session := range result.Sessions {
+		fmt.Fprintf(out, "  %s (agent %s, model %s): %d lines (human %d, AI %d, untracked %d, human override %d)\n",
+			session.Session, session.Agent, session.Model, session.Lines,
+			session.Human, session.AI, session.Untracked, session.HumanOverride)
+		if session.TokensIn != 0 || session.TokensOut != 0 ||
+			session.CacheRead != 0 || session.CacheWrite != 0 {
+			fmt.Fprintf(out, "    tokens in %d, out %d, cache read %d, cache write %d\n",
+				session.TokensIn, session.TokensOut, session.CacheRead, session.CacheWrite)
+		}
+	}
+
+	fmt.Fprintln(out, "Files:")
+	for _, file := range result.Files {
+		fmt.Fprintf(out, "  %s: %d lines (human %d, AI %d, untracked %d, human override %d)\n",
+			file.Path, file.Lines, file.Human, file.AI, file.Untracked, file.HumanOverride)
+	}
+
+	fmt.Fprintln(out, "Commits:")
+	for _, commit := range result.Commit {
+		fmt.Fprintf(out, "  %s (%s): %d lines (human %d, AI %d, untracked %d, human override %d)\n",
+			shortCommit(commit.Commit), commit.Timestamp, commit.Lines,
+			commit.Human, commit.AI, commit.Untracked, commit.HumanOverride)
+	}
+}
+
+// shortCommit abbreviates an object ID for the text report. JSON output
+// keeps the full identifier, so tooling never depends on the short form.
+func shortCommit(value string) string {
+	const shortLength = 12
+	if len(value) <= shortLength {
+		return value
+	}
+	return value[:shortLength]
+}
+
+// displayIdentity labels human lines recorded before identities were stored.
+func displayIdentity(identity string) string {
+	if identity == "" {
+		return "(unidentified)"
+	}
+	return identity
+}
+
+func displayRevisionRange(from, to string) string {
+	switch {
+	case from != "" && to != "":
+		return from + ".." + to
+	case from != "":
+		return from + "..HEAD"
+	case to != "":
+		return to
+	default:
+		return "HEAD"
+	}
+}

@@ -1,0 +1,30 @@
+* text=auto
+
+*.go text diff=golang
+*.md text
+*.yaml text
+*.yml text
+*.prs text
+*.mod text
+*.sum text
+go.work text
+LICENSE text
+LICENSE.* text
+.gitignore text
+.gitattributes text
+.editorconfig text
+
+# Documentation media
+*.gif binary
+*.png binary
+
+# Windows scripts must keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Keep byte-exact test fixtures LF on every platform.
+internal/disclosure/testdata/** text eol=lf
+internal/interop/testdata/** text eol=lf
+internal/notes/testdata/** text eol=lf
+tools/validate/testdata/** text eol=lf
+*.golden text eol=lf

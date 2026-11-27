@@ -1,0 +1,516 @@
+// Package notes encodes and locates versioned attribution notes.
+package notes
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/amichne/attributed/internal/gitcmd"
+	"github.com/amichne/attributed/internal/model"
+)
+
+const (
+	// MaxEncodedBytes bounds note parsing before allocating the complete model.
+	MaxEncodedBytes = 16 << 20
+	// MaxFiles bounds file entries in one attribution note.
+	MaxFiles = 500
+)
+
+type noteSession struct {
+	model.NoteSession
+	hasTokenUsageField bool
+}
+
+var tokenUsageFields = map[string]struct{}{
+	"tokens_in":   {},
+	"tokens_out":  {},
+	"cache_read":  {},
+	"cache_write": {},
+}
+
+func (session *noteSession) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&session.NoteSession); err != nil {
+		return err
+	}
+	for name := range tokenUsageFields {
+		if _, ok := fields[name]; ok {
+			session.hasTokenUsageField = true
+			break
+		}
+	}
+	return nil
+}
+
+type noteWire struct {
+	Version  int                       `json:"version"`
+	Files    map[string]model.NoteFile `json:"files"`
+	Sessions map[string]*noteSession   `json:"sessions"`
+}
+
+func decodeNoteWire(data []byte, version int) (noteWire, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var wire noteWire
+	if version == model.NoteVersionV1 {
+		var legacy struct {
+			Version int                       `json:"version"`
+			Files   map[string]model.NoteFile `json:"files"`
+		}
+		if err := decoder.Decode(&legacy); err != nil {
+			return noteWire{}, fmt.Errorf("decode note: %w", err)
+		}
+		wire.Version = legacy.Version
+		wire.Files = legacy.Files
+	} else if err := decoder.Decode(&wire); err != nil {
+		return noteWire{}, fmt.Errorf("decode note: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return noteWire{}, errors.New("multiple JSON values in note")
+		}
+		return noteWire{}, fmt.Errorf("decode note tail: %w", err)
+	}
+	if wire.Version != version {
+		return noteWire{}, fmt.Errorf(
+			"note version changed during decode from %d to %d",
+			version,
+			wire.Version,
+		)
+	}
+	return wire, nil
+}
+
+func decodeNoteSessions(
+	version int,
+	sessions map[string]*noteSession,
+) (map[string]model.NoteSession, error) {
+	for name, session := range sessions {
+		if session == nil {
+			return nil, fmt.Errorf("decode note session %q: session must be an object", name)
+		}
+	}
+	if version < model.NoteVersionV2 {
+		return nil, nil
+	}
+	decoded := make(map[string]model.NoteSession, len(sessions))
+	for name, session := range sessions {
+		if err := validateSession(name, session.NoteSession); err != nil {
+			return nil, err
+		}
+		if version < model.NoteVersion && session.hasTokenUsageField {
+			return nil, fmt.Errorf(
+				"note session %q carries token usage, which requires version %d",
+				name,
+				model.NoteVersion,
+			)
+		}
+		decoded[name] = session.NoteSession
+	}
+	return decoded, nil
+}
+
+// Encode returns canonical JSON with a trailing newline.
+func Encode(note model.Note) ([]byte, error) {
+	if note.Version != model.NoteVersion {
+		return nil, fmt.Errorf("unsupported note version %d", note.Version)
+	}
+	if note.Files == nil {
+		note.Files = map[string]model.NoteFile{}
+	}
+	if note.Sessions == nil {
+		note.Sessions = map[string]model.NoteSession{}
+	}
+	if len(note.Files) > MaxFiles {
+		return nil, fmt.Errorf("note has more than %d files", MaxFiles)
+	}
+	if err := validateNote(note); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(note)
+	if err != nil {
+		return nil, fmt.Errorf("encode note: %w", err)
+	}
+	if len(data)+1 > MaxEncodedBytes {
+		return nil, fmt.Errorf("note exceeds %d bytes", MaxEncodedBytes)
+	}
+	return append(data, '\n'), nil
+}
+
+// Decode reads a supported note version.
+func Decode(data []byte) (model.Note, error) {
+	if len(data) > MaxEncodedBytes {
+		return model.Note{}, fmt.Errorf("note exceeds %d bytes", MaxEncodedBytes)
+	}
+	if err := CheckFileCount(data, MaxFiles); err != nil {
+		return model.Note{}, err
+	}
+	var header struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return model.Note{}, fmt.Errorf("decode note header: %w", err)
+	}
+	switch header.Version {
+	case model.NoteVersionV1, model.NoteVersionV2, model.NoteVersionV3, model.NoteVersion:
+	default:
+		return model.Note{}, fmt.Errorf("unsupported note version %d", header.Version)
+	}
+	wire, err := decodeNoteWire(data, header.Version)
+	if err != nil {
+		return model.Note{}, err
+	}
+	sessions, err := decodeNoteSessions(wire.Version, wire.Sessions)
+	if err != nil {
+		return model.Note{}, err
+	}
+	note := model.Note{Version: wire.Version, Files: wire.Files}
+	note.Sessions = sessions
+	if note.Files == nil {
+		note.Files = map[string]model.NoteFile{}
+	}
+	if err := validateNote(note); err != nil {
+		return model.Note{}, err
+	}
+	return note, nil
+}
+
+// CheckFileCount rejects notes with more than limit file entries before the
+// complete map is decoded.
+func CheckFileCount(data []byte, limit int) error {
+	if limit < 0 {
+		return errors.New("note file limit is negative")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode note start: %w", err)
+	}
+	if token != json.Delim('{') {
+		return errors.New("note must be a JSON object")
+	}
+	count := 0
+	for decoder.More() {
+		nameToken, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode note field: %w", err)
+		}
+		name, ok := nameToken.(string)
+		if !ok {
+			return errors.New("note field name is not a string")
+		}
+		if name != "files" {
+			var skipped json.RawMessage
+			if err := decoder.Decode(&skipped); err != nil {
+				return fmt.Errorf("decode note field %q: %w", name, err)
+			}
+			continue
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode note files: %w", err)
+		}
+		if token != json.Delim('{') {
+			return errors.New("note files must be a JSON object")
+		}
+		for decoder.More() {
+			if _, err := decoder.Token(); err != nil {
+				return fmt.Errorf("decode note file name: %w", err)
+			}
+			count++
+			if count > limit {
+				return fmt.Errorf("note has more than %d files", limit)
+			}
+			var skipped json.RawMessage
+			if err := decoder.Decode(&skipped); err != nil {
+				return fmt.Errorf("decode note file: %w", err)
+			}
+		}
+		if _, err := decoder.Token(); err != nil {
+			return fmt.Errorf("decode note files end: %w", err)
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("decode note end: %w", err)
+	}
+	return nil
+}
+
+func validateNote(note model.Note) error {
+	if note.Version < model.NoteVersionV2 && len(note.Sessions) > 0 {
+		return fmt.Errorf("note sessions require version %d or newer", model.NoteVersionV2)
+	}
+	for name, session := range note.Sessions {
+		if err := validateSession(name, session); err != nil {
+			return err
+		}
+		if note.Version < model.NoteVersion && session.HasTokenUsage() {
+			return fmt.Errorf(
+				"note session %q carries token usage, which requires version %d",
+				name,
+				model.NoteVersion,
+			)
+		}
+	}
+	paths := make([]string, 0, len(note.Files))
+	for path := range note.Files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		file := note.Files[path]
+		normalized, err := gitcmd.NormalizePath(path)
+		if err != nil {
+			return fmt.Errorf("note file path %q is invalid: %w", path, err)
+		}
+		if normalized != path {
+			return fmt.Errorf("note file path %q is not normalized", path)
+		}
+		if !model.ValidObjectID(file.Blob) {
+			return fmt.Errorf("note file %q has invalid blob", path)
+		}
+		lineCount := 0
+		if len(file.Ranges) > 0 {
+			lineCount = file.Ranges[len(file.Ranges)-1].End
+		}
+		if err := model.ValidateRanges(file.Ranges, lineCount); err != nil {
+			return fmt.Errorf("note file %q: %w", path, err)
+		}
+		if note.Version < model.NoteVersionV3 {
+			for index, value := range file.Ranges {
+				if value.Identity != "" {
+					return fmt.Errorf(
+						"note file %q range %d carries a human identity, which requires version %d",
+						path,
+						index,
+						model.NoteVersionV3,
+					)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSession(name string, session model.NoteSession) error {
+	if name == "" {
+		return errors.New("note session name must not be empty")
+	}
+	if len(name) > 1024 || !utf8.ValidString(name) {
+		return fmt.Errorf("note session %q has invalid name", name)
+	}
+	for _, char := range name {
+		if unicode.IsControl(char) {
+			return fmt.Errorf("note session %q has invalid name", name)
+		}
+	}
+	if session.Agent == "" {
+		return fmt.Errorf("note session %q agent must not be empty", name)
+	}
+	if strings.Contains(session.Agent, model.NoteSessionSeparator) {
+		return fmt.Errorf("note session %q agent contains reserved separator", name)
+	}
+	prefix := model.NoteSessionKey(session.Agent, "")
+	if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
+		return fmt.Errorf("note session %q must use agent::session key", name)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"agent", session.Agent},
+		{"model", session.Model},
+		{"first_ts", session.FirstTS},
+		{"last_ts", session.LastTS},
+	} {
+		fieldName, value := field.name, field.value
+		if len(value) > 1024 {
+			return fmt.Errorf("note session %q %s exceeds 1024 bytes", name, fieldName)
+		}
+		if !utf8.ValidString(value) {
+			return fmt.Errorf("note session %q %s is not valid UTF-8", name, fieldName)
+		}
+		for _, char := range value {
+			if unicode.IsControl(char) {
+				return fmt.Errorf("note session %q %s contains a control character", name, fieldName)
+			}
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value int
+	}{
+		{"added", session.Added},
+		{"deleted", session.Deleted},
+		{"accepted", session.Accepted},
+		{"overridden", session.Overridden},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("note session %q %s is negative", name, field.name)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value uint64
+	}{
+		{"tokens_in", session.TokensIn},
+		{"tokens_out", session.TokensOut},
+		{"cache_read", session.CacheRead},
+		{"cache_write", session.CacheWrite},
+	} {
+		if field.value > model.MaxCheckpointUsageTokens {
+			return fmt.Errorf(
+				"note session %q %s exceeds %d tokens",
+				name,
+				field.name,
+				model.MaxCheckpointUsageTokens,
+			)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"first_ts", session.FirstTS},
+		{"last_ts", session.LastTS},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if _, err := time.Parse(time.RFC3339Nano, field.value); err != nil {
+			return fmt.Errorf("note session %q %s is not RFC3339: %w", name, field.name, err)
+		}
+	}
+	return nil
+}
+
+// FindFile walks first-parent history to find attribution for the exact blob.
+// It returns the whole note that carries the file, so callers can reuse its
+// session metrics.
+func FindFile(repo *gitcmd.Repo, start, path, blob string) (model.Note, bool, []string, error) {
+	return NewFinder(repo).Find(start, path, blob)
+}
+
+// maxDecodedNoteBytes bounds the raw size of the notes one Finder keeps
+// decoded. A single note may be 16 MiB, so a count limit alone does not
+// bound memory.
+const maxDecodedNoteBytes = 64 << 20
+
+// Finder looks up file attribution for many paths in one run. It lists the
+// noted commits once and keeps decoded notes up to a byte budget, so a walk
+// over a long history without notes starts no Git process per commit. Notes
+// past the budget are read and decoded again on each lookup.
+type Finder struct {
+	repo        *gitcmd.Repo
+	noted       map[string]string
+	histories   map[string][]string
+	decoded     map[string]decodedNote
+	cacheBudget int
+}
+
+type decodedNote struct {
+	note model.Note
+	err  error
+}
+
+// NewFinder returns a Finder for repo. Notes written after the first lookup
+// are not seen, so one Finder must not outlive the run that created it.
+func NewFinder(repo *gitcmd.Repo) *Finder {
+	return &Finder{
+		repo:        repo,
+		histories:   map[string][]string{},
+		decoded:     map[string]decodedNote{},
+		cacheBudget: maxDecodedNoteBytes,
+	}
+}
+
+// Find works like FindFile and shares the history, note list, and decoded
+// notes with earlier lookups of the same Finder.
+func (finder *Finder) Find(start, path, blob string) (model.Note, bool, []string, error) {
+	if start == "" {
+		return model.Note{}, false, nil, nil
+	}
+	history, err := finder.load(start)
+	if err != nil {
+		return model.Note{}, false, nil, err
+	}
+	var warnings []string
+	for _, commit := range history {
+		noteBlob, ok := finder.noted[commit]
+		if !ok {
+			continue
+		}
+		decoded, err := finder.note(commit, noteBlob)
+		if err != nil {
+			return model.Note{}, false, warnings, err
+		}
+		if decoded.err != nil {
+			warnings = append(warnings, fmt.Sprintf("ignored attribution note on %s: %v", commit, decoded.err))
+			continue
+		}
+		file, ok := decoded.note.Files[path]
+		if !ok {
+			continue
+		}
+		if file.Blob != blob {
+			return model.Note{}, false, append(warnings, fmt.Sprintf("attribution blob mismatch for %s", path)), nil
+		}
+		return decoded.note, true, warnings, nil
+	}
+	return model.Note{}, false, warnings, nil
+}
+
+// load returns the first-parent history of start and lists the noted
+// commits on first use.
+func (finder *Finder) load(start string) ([]string, error) {
+	history, ok := finder.histories[start]
+	if !ok {
+		var err error
+		history, err = finder.repo.FirstParentHistory(start)
+		if err != nil {
+			return nil, err
+		}
+		finder.histories[start] = history
+	}
+	if finder.noted == nil {
+		noted, err := finder.repo.ListNotes()
+		if err != nil {
+			return nil, err
+		}
+		finder.noted = noted
+	}
+	return history, nil
+}
+
+// note returns the decoded note of commit and keeps it while the cache
+// budget lasts. A note that does not decode is returned with its error.
+func (finder *Finder) note(commit, noteBlob string) (decodedNote, error) {
+	if decoded, ok := finder.decoded[commit]; ok {
+		return decoded, nil
+	}
+	data, err := finder.repo.ReadNoteBlob(noteBlob)
+	if err != nil {
+		return decodedNote{}, err
+	}
+	var decoded decodedNote
+	decoded.note, decoded.err = Decode(data)
+	if len(data) <= finder.cacheBudget {
+		finder.cacheBudget -= len(data)
+		finder.decoded[commit] = decoded
+	}
+	return decoded, nil
+}

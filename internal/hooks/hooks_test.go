@@ -1,0 +1,1661 @@
+package hooks
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/amichne/attributed/internal/gitcmd"
+)
+
+func TestInstallAndUninstallProjectHooks(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	configPath := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"custom":true,"PreToolUse":[{"matcher":"Read","hooks":[]}]}`
+	if err := os.WriteFile(configPath, []byte(existing), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	gitHook := filepath.Join(root, ".git", "hooks", "post-commit")
+	pushHook := filepath.Join(root, ".git", "hooks", "pre-push")
+	originalHook := "#!/bin/sh\necho existing\n"
+	originalPushHook := "#!/bin/sh\necho existing push\n"
+	if err := os.WriteFile(gitHook, []byte(originalHook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pushHook, []byte(originalPushHook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Agent: "droid", Git: true}
+	result, err := Install(root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Changed) != 7 {
+		t.Fatalf("Install changed = %v", result.Changed)
+	}
+	config := readObject(t, configPath)
+	if config["custom"] != true {
+		t.Fatalf("custom config was not preserved: %+v", config)
+	}
+	if len(config["PreToolUse"].([]any)) != 3 || len(config["PostToolUse"].([]any)) != 2 {
+		t.Fatalf("managed hooks missing: %+v", config)
+	}
+	managed := config["PostToolUse"].([]any)[0].(map[string]any)
+	command := managed["hooks"].([]any)[0].(map[string]any)["command"]
+	if command != agentSpecs("droid", "git-attributed")["PostToolUse"][0].command {
+		t.Fatalf("project hook command = %q", command)
+	}
+	hookData, err := os.ReadFile(gitHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hookData), "echo existing") || !strings.Contains(string(hookData), blockStart) {
+		t.Fatalf("hook = %q", hookData)
+	}
+	pushData, err := os.ReadFile(pushHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pushData), "echo existing push") ||
+		!strings.Contains(string(pushData), "refs/notes/attributed:refs/notes/attributed") ||
+		!strings.Contains(string(pushData), "git push --no-verify -- \"$2\"") {
+		t.Fatalf("pre-push hook = %q", pushData)
+	}
+	if _, err := os.Stat(configPath + ".git-attributed.bak"); err != nil {
+		t.Fatalf("config backup missing: %v", err)
+	}
+	if result, err := Install(root, options); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("second Install = %+v, %v", result, err)
+	}
+
+	result, err = Uninstall(root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Changed) != 7 {
+		t.Fatalf("Uninstall changed = %v", result.Changed)
+	}
+	config = readObject(t, configPath)
+	if config["custom"] != true || len(config["PreToolUse"].([]any)) != 1 {
+		t.Fatalf("uninstall damaged config: %+v", config)
+	}
+	hookData, err = os.ReadFile(gitHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hookData) != originalHook {
+		t.Fatalf("uninstalled hook = %q, want %q", hookData, originalHook)
+	}
+	pushData, err = os.ReadFile(pushHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pushData) != originalPushHook {
+		t.Fatalf("uninstalled pre-push hook = %q, want %q", pushData, originalPushHook)
+	}
+	if result, err := Uninstall(root, options); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("second Uninstall = %+v, %v", result, err)
+	}
+}
+
+func TestInstallAllAgentsAndCustomHooksPath(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	hookGit(t, root, "config", "core.hooksPath", ".hooks")
+	result, err := Install(root, Options{Agent: "all", Git: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Changed) != 8 {
+		t.Fatalf("Install changed = %v", result.Changed)
+	}
+	for _, path := range []string{
+		filepath.Join(root, ".factory", "hooks.json"),
+		filepath.Join(root, ".claude", "settings.json"),
+		filepath.Join(root, ".hooks", "post-commit"),
+		filepath.Join(root, ".hooks", "pre-push"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s missing: %v", path, err)
+		}
+	}
+	claude := readObject(t, filepath.Join(root, ".claude", "settings.json"))
+	hooks, ok := claude["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("Claude hooks are not nested under hooks: %+v", claude)
+	}
+	for _, event := range []string{"PreToolUse", "PostToolUse"} {
+		if len(hooks[event].([]any)) != 2 {
+			t.Fatalf("Claude %s hooks = %+v", event, hooks[event])
+		}
+	}
+}
+
+func TestInvalidAgentConfigFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, invalid := range []string{"{bad", "{}{}"} {
+		root := hookRepo(t)
+		path := filepath.Join(root, ".factory", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(root, Options{Agent: "droid"}); err == nil {
+			t.Fatalf("Install accepted invalid JSON %q", invalid)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != invalid {
+			t.Fatalf("invalid config changed: %q, %v", data, err)
+		}
+	}
+}
+
+func TestAgentConfigSymlinkFailsClosed(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	target := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Install(root, Options{Agent: "droid"}); err == nil {
+		t.Fatal("Install accepted a symlinked configuration")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "{}\n" {
+		t.Fatalf("symlink target changed: %q, %v", data, err)
+	}
+	parentRoot := hookRepo(t)
+	parentTarget := t.TempDir()
+	if err := os.Symlink(parentTarget, filepath.Join(parentRoot, ".factory")); err != nil {
+		t.Skipf("parent symlink unavailable: %v", err)
+	}
+	if _, err := Install(parentRoot, Options{Agent: "droid"}); err == nil {
+		t.Fatal("Install accepted a symlinked configuration parent")
+	}
+	entries, err := os.ReadDir(parentTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("configuration parent target changed: %v", entries)
+	}
+}
+
+func TestUninstallPreservesCustomHooksInManagedEntry(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": spec.matcher,
+			"hooks": []any{
+				map[string]any{"type": "command", "command": spec.command, "timeout": 30},
+				map[string]any{"type": "command", "command": "echo custom"},
+			},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Uninstall(root, Options{Agent: "droid"})
+	if err != nil || len(result.Changed) != 1 {
+		t.Fatalf("Uninstall() = %+v, %v", result, err)
+	}
+	got := readObject(t, path)
+	entries := got["PreToolUse"].([]any)
+	hookValues := entries[0].(map[string]any)["hooks"].([]any)
+	if len(hookValues) != 1 || hookValues[0].(map[string]any)["command"] != "echo custom" {
+		t.Fatalf("custom hooks were not preserved: %+v", got)
+	}
+}
+
+func TestUninstallPreservesManagedEntryMetadata(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher":      spec.matcher,
+			"commandRegex": "^edit",
+			"hooks":        []any{map[string]any{"type": "command", "command": spec.command}},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Uninstall(root, Options{Agent: "droid"}); err != nil {
+		t.Fatal(err)
+	}
+	entry := readObject(t, path)["PreToolUse"].([]any)[0].(map[string]any)
+	if entry["commandRegex"] != "^edit" || len(entry["hooks"].([]any)) != 0 {
+		t.Fatalf("matcher metadata changed: %+v", entry)
+	}
+}
+
+func TestUninstallPreservesDifferentMatcher(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": "Read",
+			"hooks":   []any{map[string]any{"type": "command", "command": spec.command}},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Uninstall(root, Options{Agent: "droid"})
+	if err != nil || len(result.Changed) != 0 {
+		t.Fatalf("Uninstall() = %+v, %v", result, err)
+	}
+}
+
+func TestInstallDroidUsesRootSchema(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if _, err := Install(root, Options{Agent: "droid"}); err != nil {
+		t.Fatal(err)
+	}
+	config := readObject(t, path)
+	if _, nested := config["hooks"]; nested {
+		t.Fatalf("Droid hooks unexpectedly nested: %+v", config)
+	}
+	if len(config["PreToolUse"].([]any)) != 2 || len(config["PostToolUse"].([]any)) != 2 {
+		t.Fatalf("root Droid hooks missing: %+v", config)
+	}
+}
+
+func TestInstallDroidPreservesNestedValues(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"hooks":{"custom":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "droid"}); err != nil {
+		t.Fatal(err)
+	}
+	config := readObject(t, path)
+	if len(config["PreToolUse"].([]any)) != 2 || len(config["PostToolUse"].([]any)) != 2 {
+		t.Fatalf("root Droid hooks missing: %+v", config)
+	}
+	nested, ok := config["hooks"].(map[string]any)
+	if !ok || nested["custom"] != true || len(nested) != 1 {
+		t.Fatalf("nested values changed: %+v", config)
+	}
+}
+
+func TestUninstallRemovesLegacyNestedDroidHooks(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	config := map[string]any{
+		"hooks": map[string]any{
+			"custom": true,
+			"PreToolUse": []any{map[string]any{
+				"matcher": spec.matcher,
+				"hooks":   []any{map[string]any{"type": "command", "command": spec.command}},
+			}},
+		},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Uninstall(root, Options{Agent: "droid"}); err != nil {
+		t.Fatal(err)
+	}
+	nested := readObject(t, path)["hooks"].(map[string]any)
+	if nested["custom"] != true || len(nested) != 1 {
+		t.Fatalf("legacy nested hooks not cleaned: %+v", nested)
+	}
+}
+
+func TestCustomHookWithManagedSuffixIsPreserved(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	custom := "audit-wrapper && " + spec.command
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": spec.matcher,
+			"hooks":   []any{map[string]any{"type": "command", "command": custom}},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Uninstall(root, Options{Agent: "droid"}); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("Uninstall() = %+v, %v", result, err)
+	}
+	got := readObject(t, path)
+	command := got["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"]
+	if command != custom {
+		t.Fatalf("custom wrapper = %q, want %q", command, custom)
+	}
+}
+
+func TestLegacyManagedAgentHookIsMigrated(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	legacy := strings.Replace(current.command, " --managed-by git-attributed", "", 1)
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": current.matcher,
+			"hooks":   []any{map[string]any{"type": "command", "command": legacy, "timeout": 30}},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Install(root, Options{Agent: "droid"}); err != nil || len(result.Changed) != 1 {
+		t.Fatalf("Install() = %+v, %v", result, err)
+	}
+	got := readObject(t, path)
+	command := got["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
+	if !strings.Contains(command, "--managed-by git-attributed") || strings.Contains(command, "/old/git-attributed") {
+		t.Fatalf("migrated command = %q", command)
+	}
+}
+
+func TestManagedAgentHookUpdatesInPlace(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := agentSpecs("droid", "/old/git-attributed")["PreToolUse"][0]
+	config := map[string]any{
+		"PreToolUse": []any{map[string]any{
+			"matcher": old.matcher,
+			"hooks": []any{
+				map[string]any{"type": "command", "command": "echo before"},
+				map[string]any{"type": "command", "command": old.command, "timeout": 30},
+				map[string]any{"type": "command", "command": "echo after"},
+			},
+		}},
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Install(root, Options{Agent: "droid"}); err != nil || len(result.Changed) != 1 {
+		t.Fatalf("Install() = %+v, %v", result, err)
+	}
+	got := readObject(t, path)
+	hooks := got["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)
+	commands := make([]string, 0, len(hooks))
+	for _, value := range hooks {
+		commands = append(commands, value.(map[string]any)["command"].(string))
+	}
+	want := []string{"echo before", agentSpecs("droid", "git-attributed")["PreToolUse"][0].command, "echo after"}
+	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands = %q, want %q", commands, want)
+	}
+	if result, err := Install(root, Options{Agent: "droid"}); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("second Install() = %+v, %v", result, err)
+	}
+}
+
+func TestSingleExecutableCommandRecognition(t *testing.T) {
+	t.Parallel()
+	signature := " checkpoint droid --type ai --hook-input stdin"
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{`'/path with space/git-attributed'` + signature, true},
+		{`"C:\Program Files\git-attributed.exe"` + signature, true},
+		{`'/path/audit-wrapper'` + signature, true},
+		{`audit-wrapper && '/path/git-attributed'` + signature, false},
+		{`'/path/git-attributed'; echo unsafe` + signature, false},
+	}
+	for _, test := range tests {
+		if got := commandHasSingleExecutable(test.command, signature); got != test.want {
+			t.Errorf("commandHasSingleExecutable(%q) = %t, want %t", test.command, got, test.want)
+		}
+	}
+}
+
+func TestManagedAgentCommandRequiresGitAttributedIdentity(t *testing.T) {
+	t.Parallel()
+	spec := agentSpecs("droid", "/old/git-attributed")["PostToolUse"][0]
+	signature := spec.command[strings.Index(spec.command, " checkpoint "):]
+	legacy := strings.Replace(signature, " --managed-by git-attributed", "", 1)
+	if managedAgentCommand(`'/path/audit-wrapper'`+legacy, spec) {
+		t.Fatal("managedAgentCommand accepted unmarked custom executable")
+	}
+	if managedAgentCommand(`'/path/audit-wrapper'`+signature, spec) {
+		t.Fatal("managedAgentCommand accepted marker-only custom executable")
+	}
+	if !managedAgentCommand(`'/path/git-attributed'`+signature, spec) {
+		t.Fatal("managedAgentCommand rejected git-attributed executable")
+	}
+}
+
+func TestUserConfigScope(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("home directory environment differs on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	result, err := Install(root, Options{Agent: "droid", User: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".factory", "hooks.json")
+	if len(result.Changed) != 1 || result.Changed[0] != want {
+		t.Fatalf("Install changed = %v, want %s", result.Changed, want)
+	}
+}
+
+func TestHookFailuresAndGitOnly(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	result, err := Install(root, Options{Agent: "none", Git: true})
+	if err != nil || len(result.Changed) != 6 {
+		t.Fatalf("Git-only Install = %+v, %v", result, err)
+	}
+	hook := filepath.Join(root, ".git", "hooks", "post-commit")
+	data, err := os.ReadFile(hook)
+	if err != nil || !strings.Contains(string(data), blockStart) {
+		t.Fatalf("hook = %q, %v", data, err)
+	}
+	pushHook := filepath.Join(root, ".git", "hooks", "pre-push")
+	data, err = os.ReadFile(pushHook)
+	if err != nil || !strings.Contains(string(data), "refs/notes/attributed") {
+		t.Fatalf("pre-push hook = %q, %v", data, err)
+	}
+	if _, err := Uninstall(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{hook, pushHook} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("uninstalled hook %s still exists: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\n"+blockStart+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+		t.Fatal("Install accepted incomplete managed block")
+	}
+	for _, content := range []string{
+		"#!/bin/sh\n" + blockStart + "\necho custom\n" + blockEnd + "\n",
+		"#!/bin/sh\n" + blockEnd + "\n" + blockStart + "\n",
+	} {
+		if err := os.WriteFile(hook, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+			t.Fatalf("Install accepted unrecognized managed block %q", content)
+		}
+		if got := string(mustRead(t, hook)); got != content {
+			t.Fatalf("unrecognized managed block changed to %q", got)
+		}
+	}
+
+	configPath := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"PreToolUse":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "droid"}); err == nil {
+		t.Fatal("Install accepted non-array event")
+	}
+	claudePath := filepath.Join(root, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(`{"hooks":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "claude"}); err == nil {
+		t.Fatal("Install accepted non-object Claude hooks")
+	}
+}
+
+func TestLocalNotesOptOut(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	defaults := Options{Agent: "none", Git: true}
+	if result, err := Install(root, defaults); err != nil || len(result.Changed) != 6 {
+		t.Fatalf("Install(defaults) = %+v, %v", result, err)
+	}
+	prePush := filepath.Join(root, ".git", "hooks", "pre-push")
+	if _, err := os.Stat(prePush); err != nil {
+		t.Fatal(err)
+	}
+	local := Options{Agent: "none", Git: true, LocalNotes: true}
+	if result, err := Install(root, local); err != nil || len(result.Changed) != 1 {
+		t.Fatalf("Install(local) = %+v, %v", result, err)
+	}
+	if _, err := os.Stat(prePush); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("local notes left pre-push hook: %v", err)
+	}
+	if result, err := Install(root, local); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("second Install(local) = %+v, %v", result, err)
+	}
+	if result, err := Install(root, defaults); err != nil || len(result.Changed) != 1 {
+		t.Fatalf("restore sharing = %+v, %v", result, err)
+	}
+}
+
+func TestInstallUpdatesManagedGitHook(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".git", "hooks", "pre-push")
+	stale := "#!/bin/sh\nexit 0\n\n" + blockStart + "\n" + legacyNotesPushCommand + "\n" + blockEnd + "\n"
+	if err := os.WriteFile(path, []byte(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Install(root, Options{Agent: "none", Git: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Changed) != 6 {
+		t.Fatalf("Install changed = %v", result.Changed)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := hookExecutable(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), "#!/bin/sh\n"+blockStart) ||
+		!strings.Contains(string(data), notesPushCommand(executable)) ||
+		strings.Contains(string(data), legacyNotesPushCommand) ||
+		!strings.Contains(string(data), "exit 0") {
+		t.Fatalf("updated hook = %q", data)
+	}
+	if result, err := Install(root, Options{Agent: "none", Git: true}); err != nil || len(result.Changed) != 0 {
+		t.Fatalf("second Install() = %+v, %v", result, err)
+	}
+}
+
+func TestUninstallRemovesLegacyNotesPushBlock(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".git", "hooks", "pre-push")
+	custom := "#!/bin/sh\necho custom push\n"
+	legacy := "#!/bin/sh\n" + blockStart + "\n" + legacyNotesPushCommand + "\n" + blockEnd + "\necho custom push\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Uninstall(root, Options{Agent: "none", Git: true})
+	if err != nil || len(result.Changed) != 1 {
+		t.Fatalf("Uninstall() = %+v, %v", result, err)
+	}
+	if got := string(mustRead(t, path)); got != custom {
+		t.Fatalf("uninstalled pre-push hook = %q, want %q", got, custom)
+	}
+}
+
+func TestNotesPushBlockRecognition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "legacy block", command: legacyNotesPushCommand, want: true},
+		{name: "other git-attributed path", command: notesPushCommand("/old/bin/git-attributed"), want: true},
+		{name: "windows git-attributed path", command: notesPushCommand(`C:\Tools\git-attributed.exe`), want: true},
+		{name: "foreign executable", command: notesPushCommand("/usr/local/bin/audit-wrapper"), want: false},
+		{
+			name:    "unquoted executable",
+			command: notesPushPrefix + "/old/bin/git-attributed" + notesPushSuffix,
+			want:    false,
+		},
+		{
+			name:    "extra command",
+			command: notesPushPrefix + "'/old/bin/git-attributed'; rm -rf /tmp/x;" + notesPushSuffix,
+			want:    false,
+		},
+		{
+			name:    "changed push line",
+			command: strings.Replace(notesPushCommand("/old/bin/git-attributed"), "--no-verify", "--force", 1),
+			want:    false,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			block := blockStart + "\n" + test.command + "\n" + blockEnd
+			if got := managedGitHookBlock(block); got != test.want {
+				t.Fatalf("managedGitHookBlock() = %t, want %t for %q", got, test.want, test.command)
+			}
+		})
+	}
+}
+
+func TestGitHookSafetyAndLinkedWorktree(t *testing.T) {
+	t.Parallel()
+	t.Run("non-shell", func(t *testing.T) {
+		root := hookRepo(t)
+		path := filepath.Join(root, ".git", "hooks", "post-commit")
+		original := "#!/usr/bin/env python3\nprint('custom')\n"
+		if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+			t.Fatal("Install accepted non-shell hook")
+		}
+		if got := string(mustRead(t, path)); got != original {
+			t.Fatalf("non-shell hook changed to %q", got)
+		}
+	})
+	t.Run("pre-existing shell stub", func(t *testing.T) {
+		root := hookRepo(t)
+		path := filepath.Join(root, ".git", "hooks", "post-commit")
+		original := "#!/bin/sh\n"
+		if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Uninstall(root, Options{Agent: "none", Git: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(mustRead(t, path)); got != original {
+			t.Fatalf("pre-existing hook changed to %q", got)
+		}
+	})
+	t.Run("unmanaged non-shell uninstall", func(t *testing.T) {
+		root := hookRepo(t)
+		original := "#!/usr/bin/env python3\nprint('custom')\n"
+		for _, name := range []string{"post-commit", "pre-push"} {
+			path := filepath.Join(root, ".git", "hooks", name)
+			if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := Uninstall(root, Options{Agent: "none", Git: true})
+		if err != nil || len(result.Changed) != 0 {
+			t.Fatalf("Uninstall() = %+v, %v", result, err)
+		}
+		if got := string(mustRead(t, filepath.Join(root, ".git", "hooks", "pre-push"))); got != original {
+			t.Fatalf("pre-push hook changed to %q", got)
+		}
+	})
+	t.Run("local notes preserves unmanaged non-shell pre-push", func(t *testing.T) {
+		root := hookRepo(t)
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, ".git", "hooks", "pre-push")
+		original := "#!/usr/bin/env python3\nprint('custom')\n"
+		if err := os.WriteFile(path, []byte(original), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Install(root, Options{Agent: "none", Git: true, LocalNotes: true})
+		if err != nil || len(result.Changed) != 0 {
+			t.Fatalf("Install(local notes) = %+v, %v", result, err)
+		}
+		if got := string(mustRead(t, path)); got != original {
+			t.Fatalf("pre-push hook changed to %q", got)
+		}
+	})
+	t.Run("symlinked custom hooks path", func(t *testing.T) {
+		root := hookRepo(t)
+		target := t.TempDir()
+		link := filepath.Join(root, ".hooks")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		hookGit(t, root, "config", "core.hooksPath", ".hooks")
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+			t.Fatal("Install accepted symlinked hooks directory")
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("symlink target changed: %v", entries)
+		}
+	})
+	t.Run("external custom hooks path", func(t *testing.T) {
+		root := hookRepo(t)
+		target := t.TempDir()
+		hookGit(t, root, "config", "core.hooksPath", target)
+		if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+			t.Fatal("Install accepted external hooks directory")
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("external hooks directory changed: %v", entries)
+		}
+	})
+	t.Run("linked worktree", func(t *testing.T) {
+		root := hookRepo(t)
+		hookGit(t, root, "config", "user.name", "Test User")
+		hookGit(t, root, "config", "user.email", "test@example.invalid")
+		if err := os.WriteFile(filepath.Join(root, "file"), []byte("base\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		hookGit(t, root, "add", "file")
+		hookGit(t, root, "commit", "-m", "base")
+		linked := filepath.Join(t.TempDir(), "linked")
+		hookGit(t, root, "worktree", "add", "-b", "linked", linked)
+		if _, err := Install(linked, Options{Agent: "none", Git: true}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"post-commit", "pre-push"} {
+			if _, err := os.Stat(filepath.Join(root, ".git", "hooks", name)); err != nil {
+				t.Fatalf("common %s missing: %v", name, err)
+			}
+		}
+	})
+}
+
+func TestPrePushSharesNotes(t *testing.T) {
+	t.Parallel()
+	root, remote, _ := pushFixture(t)
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 0, "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != "" {
+		t.Fatalf("git-attributed calls without remote notes = %q", calls)
+	}
+	localNote := strings.TrimSpace(hookGit(t, root, "rev-parse", "refs/notes/attributed"))
+	remoteNote := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed"))
+	if localNote != remoteNote {
+		t.Fatalf("remote note = %q, want %q", remoteNote, localNote)
+	}
+	localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+	remoteHead := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main"))
+	if localHead != remoteHead {
+		t.Fatalf("remote HEAD = %q, want %q", remoteHead, localHead)
+	}
+}
+
+func TestPrePushMergesRemoteNotesBeforePush(t *testing.T) {
+	t.Parallel()
+	root, remote, _ := pushFixture(t)
+	hookGit(t, root, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+	remoteNotes := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed"))
+	hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "local", "HEAD~1")
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 0, "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != "merge-notes --remote origin\n" {
+		t.Fatalf("git-attributed calls = %q", calls)
+	}
+	// The helper merges nothing, so the fetched ref stays for inspection.
+	if fetched := strings.TrimSpace(hookGit(t, root, "rev-parse", gitcmd.RemoteNotesRef)); fetched != remoteNotes {
+		t.Fatalf("fetched notes = %q, want %q", fetched, remoteNotes)
+	}
+	localNotes := strings.TrimSpace(hookGit(t, root, "rev-parse", "refs/notes/attributed"))
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != localNotes {
+		t.Fatalf("remote notes = %q, want %q", got, localNotes)
+	}
+	localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != localHead {
+		t.Fatalf("remote HEAD = %q, want %q", got, localHead)
+	}
+}
+
+func TestPrePushStopsBranchWhenNotesMergeFails(t *testing.T) {
+	t.Parallel()
+	root, remote, oldRemoteHead := pushFixture(t)
+	hookGit(t, root, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+	remoteNotes := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed"))
+	hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "local", "HEAD~1")
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 1, "origin", "main")
+	if err == nil {
+		t.Fatal("push succeeded after merge-notes failed")
+	}
+	if calls != "merge-notes --remote origin\n" {
+		t.Fatalf("git-attributed calls = %q", calls)
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != oldRemoteHead {
+		t.Fatalf("remote HEAD advanced to %q, want %q", got, oldRemoteHead)
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != remoteNotes {
+		t.Fatalf("remote notes moved to %q, want %q", got, remoteNotes)
+	}
+}
+
+// TestPrePushPushesWithoutMergeNotes covers a hook that outlived its binary:
+// a missing git-attributed exits 127 and an older one without merge-notes exits
+// 2. Neither may stop the push, because the notes push after the sync never
+// forces.
+func TestPrePushPushesWithoutMergeNotes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		install  func(t *testing.T, root string)
+		callExit int
+		calls    string
+	}{
+		{
+			name: "older binary",
+			install: func(t *testing.T, root string) {
+				if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			callExit: 2,
+			calls:    "merge-notes --remote origin\n",
+		},
+		{
+			name: "missing binary",
+			install: func(t *testing.T, root string) {
+				writeNotesPushHook(t, filepath.Join(root, ".git", "hooks"), filepath.Join(t.TempDir(), "missing", "git-attributed"))
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root, remote, _ := pushFixture(t)
+			hookGit(t, root, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+			remoteNotes := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed"))
+			hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "local", "HEAD~1")
+			test.install(t, root)
+			calls, err := hookPush(t, root, test.callExit, "origin", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != test.calls {
+				t.Fatalf("git-attributed calls = %q, want %q", calls, test.calls)
+			}
+			// Nothing merged, so the fetched ref shows that the hook got
+			// past the fetch to the merge step.
+			if fetched := strings.TrimSpace(hookGit(t, root, "rev-parse", gitcmd.RemoteNotesRef)); fetched != remoteNotes {
+				t.Fatalf("fetched notes = %q, want %q", fetched, remoteNotes)
+			}
+			localNotes := strings.TrimSpace(hookGit(t, root, "rev-parse", "refs/notes/attributed"))
+			if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != localNotes {
+				t.Fatalf("remote notes = %q, want %q", got, localNotes)
+			}
+			localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+			if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != localHead {
+				t.Fatalf("remote HEAD = %q, want %q", got, localHead)
+			}
+		})
+	}
+}
+
+// TestPrePushSkipsNotesSyncInBareRepository pushes from a bare mirror.
+// merge-notes needs a work tree, so the hook must not call it and pushes the
+// notes as they are.
+func TestPrePushSkipsNotesSyncInBareRepository(t *testing.T) {
+	t.Parallel()
+	root, remote, _ := pushFixture(t)
+	hookGit(t, root, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+	bare := filepath.Join(t.TempDir(), "mirror.git")
+	hookGit(t, root, "clone", "--quiet", "--mirror", root, bare)
+	hookGit(t, bare, "remote", "add", "target", remote)
+	hookGit(t, bare, "-c", "user.name=Test User", "-c", "user.email=test@example.invalid",
+		"notes", "--ref=refs/notes/attributed", "add", "-m", "mirror", "HEAD~1")
+	executable, err := hookExecutable(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeNotesPushHook(t, filepath.Join(bare, "hooks"), executable)
+	calls, err := hookPush(t, bare, 0, "target", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != "" {
+		t.Fatalf("git-attributed calls in a bare repository = %q", calls)
+	}
+	bareNotes := strings.TrimSpace(hookGit(t, bare, "rev-parse", "refs/notes/attributed"))
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != bareNotes {
+		t.Fatalf("remote notes = %q, want %q", got, bareNotes)
+	}
+	bareHead := strings.TrimSpace(hookGit(t, bare, "rev-parse", "refs/heads/main"))
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != bareHead {
+		t.Fatalf("remote HEAD = %q, want %q", got, bareHead)
+	}
+}
+
+// TestPrePushFetchesNotesFromPushURL uses a remote with a separate push URL.
+// The hook must sync with the repository that gets the push, not with the
+// one the remote fetches from.
+func TestPrePushFetchesNotesFromPushURL(t *testing.T) {
+	t.Parallel()
+	root, pushTarget, _ := pushFixture(t)
+	fetchSource := filepath.Join(t.TempDir(), "fetch.git")
+	hookGit(t, root, "init", "--quiet", "--bare", fetchSource)
+	hookGit(t, root, "push", fetchSource, "main", "refs/notes/attributed:refs/notes/attributed")
+	hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "local", "HEAD~1")
+	hookGit(t, root, "push", pushTarget, "refs/notes/attributed:refs/notes/attributed")
+	pushNotes := strings.TrimSpace(hookGit(t, pushTarget, "rev-parse", "refs/notes/attributed"))
+	hookGit(t, root, "remote", "set-url", "origin", fetchSource)
+	hookGit(t, root, "remote", "set-url", "--push", "origin", pushTarget)
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 0, "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != "merge-notes --remote origin\n" {
+		t.Fatalf("git-attributed calls = %q", calls)
+	}
+	if fetched := strings.TrimSpace(hookGit(t, root, "rev-parse", gitcmd.RemoteNotesRef)); fetched != pushNotes {
+		t.Fatalf("fetched notes = %q, want the push URL notes %q", fetched, pushNotes)
+	}
+	localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+	if got := strings.TrimSpace(hookGit(t, pushTarget, "rev-parse", "refs/heads/main")); got != localHead {
+		t.Fatalf("push URL HEAD = %q, want %q", got, localHead)
+	}
+}
+
+// TestPrePushSyncsEachPushURL uses a remote with two push URLs. Git runs the
+// hook once per URL, so each run must fetch from and push the notes to its
+// own URL only.
+func TestPrePushSyncsEachPushURL(t *testing.T) {
+	t.Parallel()
+	root, first, _ := pushFixture(t)
+	second := filepath.Join(t.TempDir(), "second.git")
+	hookGit(t, root, "init", "--quiet", "--bare", second)
+	hookGit(t, root, "push", second, "HEAD~1:refs/heads/main")
+	hookGit(t, root, "remote", "set-url", "--push", "origin", first)
+	hookGit(t, root, "remote", "set-url", "--add", "--push", "origin", second)
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 0, "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Neither URL had notes. A notes push to the remote name would reach the
+	// second URL in the first run, and the second run would merge them.
+	if calls != "" {
+		t.Fatalf("git-attributed calls = %q, want none", calls)
+	}
+	localNotes := strings.TrimSpace(hookGit(t, root, "rev-parse", "refs/notes/attributed"))
+	localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+	for _, target := range []string{first, second} {
+		if got := strings.TrimSpace(hookGit(t, target, "rev-parse", "refs/notes/attributed")); got != localNotes {
+			t.Fatalf("%s notes = %q, want %q", target, got, localNotes)
+		}
+		if got := strings.TrimSpace(hookGit(t, target, "rev-parse", "refs/heads/main")); got != localHead {
+			t.Fatalf("%s HEAD = %q, want %q", target, got, localHead)
+		}
+	}
+}
+
+// TestPrePushRefusesMalformedRemoteNotes serves remote notes whose tree has
+// an entry name with a slash. The notes fetch must refuse them before they
+// are stored, so merge-notes never sees them and the plain notes push, which
+// never forces, leaves them on the remote.
+func TestPrePushRefusesMalformedRemoteNotes(t *testing.T) {
+	t.Parallel()
+	root, remote, oldRemoteHead := pushFixture(t)
+	commit := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD~1"))
+	scratch := t.TempDir()
+	notePath := filepath.Join(scratch, "note")
+	if err := os.WriteFile(notePath, []byte("note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blob := strings.TrimSpace(hookGit(t, remote, "hash-object", "-w", notePath))
+	raw, err := hex.DecodeString(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// mktree refuses a name with a slash, so the tree is written raw.
+	treePath := filepath.Join(scratch, "tree")
+	if err := os.WriteFile(treePath, []byte("100644 "+commit[:2]+"/"+commit[2:]+"\x00"+string(raw)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree := strings.TrimSpace(hookGit(t, remote, "hash-object", "-t", "tree", "--literally", "-w", treePath))
+	notes := strings.TrimSpace(hookGit(t, remote, "-c", "user.name=Test User", "-c", "user.email=test@example.invalid",
+		"commit-tree", tree, "-m", "notes"))
+	hookGit(t, remote, "update-ref", "refs/notes/attributed", notes)
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, root, 0, "origin", "main")
+	if err == nil {
+		t.Fatal("push succeeded over unrelated remote notes")
+	}
+	if calls != "" {
+		t.Fatalf("git-attributed calls = %q, want none", calls)
+	}
+	for _, object := range []string{gitcmd.RemoteNotesRef, tree} {
+		check := exec.Command("git", "cat-file", "-e", object)
+		check.Dir = root
+		if check.Run() == nil {
+			t.Fatalf("local repository has %s from the malformed remote notes", object)
+		}
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != notes {
+		t.Fatalf("remote notes moved to %q, want %q", got, notes)
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != oldRemoteHead {
+		t.Fatalf("remote HEAD advanced to %q, want %q", got, oldRemoteHead)
+	}
+}
+
+// TestPrePushNotesSyncNeedsItsOwnRepository pushes with an explicit Git dir.
+// Git runs the hook in the directory where the push starts when that is
+// outside the work tree, and merge-notes finds the repository from there, so
+// the hook must skip the sync and push the notes as they are. Started inside
+// the work tree, the same push syncs.
+func TestPrePushNotesSyncNeedsItsOwnRepository(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		dir   func(t *testing.T, root string) string
+		calls string
+	}{
+		{
+			name:  "outside the work tree",
+			dir:   func(t *testing.T, _ string) string { return t.TempDir() },
+			calls: "",
+		},
+		{
+			name: "inside the work tree",
+			dir: func(t *testing.T, root string) string {
+				dir := filepath.Join(root, "sub")
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			calls: "merge-notes --remote origin\n",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root, remote, _ := pushFixture(t)
+			hookGit(t, root, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+			hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "local", "HEAD~1")
+			if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := hookRun(t, test.dir(t, root), 0,
+				"--git-dir="+filepath.Join(root, ".git"), "--work-tree="+root, "push", "origin", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != test.calls {
+				t.Fatalf("git-attributed calls = %q, want %q", calls, test.calls)
+			}
+			localNotes := strings.TrimSpace(hookGit(t, root, "rev-parse", "refs/notes/attributed"))
+			if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != localNotes {
+				t.Fatalf("remote notes = %q, want %q", got, localNotes)
+			}
+			localHead := strings.TrimSpace(hookGit(t, root, "rev-parse", "HEAD"))
+			if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != localHead {
+				t.Fatalf("remote HEAD = %q, want %q", got, localHead)
+			}
+		})
+	}
+}
+
+func writeNotesPushHook(t *testing.T, hooksDir, executable string) {
+	t.Helper()
+	hook := "#!/bin/sh\n" + blockStart + "\n" + notesPushCommand(executable) + "\n" + blockEnd + "\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrePushRunsCustomHookOnce(t *testing.T) {
+	t.Parallel()
+	root, _, _ := pushFixture(t)
+	hook := filepath.Join(root, ".git", "hooks", "pre-push")
+	script := "#!/bin/sh\nprintf 'run\\n' >> .git/pre-push-runs\n"
+	if err := os.WriteFile(hook, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hookPush(t, root, 0, "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".git", "pre-push-runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "run\n" {
+		t.Fatalf("custom pre-push runs = %q", data)
+	}
+}
+
+func TestPrePushStopsBranchWhenNotesFail(t *testing.T) {
+	t.Parallel()
+	root, remote, oldRemoteHead := pushFixture(t)
+	hook := filepath.Join(remote, "hooks", "pre-receive")
+	script := "#!/bin/sh\nwhile read old new ref; do\n" +
+		"  if [ \"$ref\" = refs/notes/attributed ]; then exit 1; fi\n" +
+		"done\n"
+	if err := os.WriteFile(hook, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hookPush(t, root, 0, "origin", "main"); err == nil {
+		t.Fatal("push succeeded despite rejected notes")
+	}
+	remoteHead := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main"))
+	if remoteHead != oldRemoteHead {
+		t.Fatalf("remote HEAD advanced to %q, want %q", remoteHead, oldRemoteHead)
+	}
+	if command := exec.Command("git", "show-ref", "--verify", "refs/notes/attributed"); func() bool {
+		command.Dir = remote
+		return command.Run() == nil
+	}() {
+		t.Fatal("remote received rejected attribution notes")
+	}
+}
+
+// TestPrePushNeverOverwritesNotes leaves the notes diverged after merge-notes,
+// with a notes fetch refspec configured. Neither the hook fetch nor the notes
+// push may replace notes on either side, and the branch must not go out.
+func TestPrePushNeverOverwritesNotes(t *testing.T) {
+	t.Parallel()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	first := hookRepo(t)
+	hookGit(t, first, "config", "user.name", "Test User")
+	hookGit(t, first, "config", "user.email", "test@example.invalid")
+	hookGit(t, first, "init", "--bare", remote)
+	if err := os.WriteFile(filepath.Join(first, "file.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookGit(t, first, "add", "file.txt")
+	hookGit(t, first, "commit", "-m", "base")
+	base := strings.TrimSpace(hookGit(t, first, "rev-parse", "HEAD"))
+	hookGit(t, first, "remote", "add", "origin", remote)
+	hookGit(t, first, "push", "-u", "origin", "main")
+
+	second := filepath.Join(t.TempDir(), "second")
+	hookGit(t, t.TempDir(), "clone", "--branch", "main", remote, second)
+	hookGit(t, second, "config", "user.name", "Test User")
+	hookGit(t, second, "config", "user.email", "test@example.invalid")
+	hookGit(t, second, "config", "--add", "remote.origin.fetch", "+refs/notes/*:refs/notes/*")
+	if err := os.WriteFile(filepath.Join(second, "file.txt"), []byte("base\nchange\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookGit(t, second, "commit", "-am", "change")
+	head := strings.TrimSpace(hookGit(t, second, "rev-parse", "HEAD"))
+	hookGit(t, first, "notes", "--ref=refs/notes/attributed", "add", "-m", "first note", base)
+	hookGit(t, first, "push", "origin", "refs/notes/attributed:refs/notes/attributed")
+	remoteNotes := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed"))
+	hookGit(t, second, "notes", "--ref=refs/notes/attributed", "add", "-m", "second note", head)
+	localNotes := strings.TrimSpace(hookGit(t, second, "rev-parse", "refs/notes/attributed"))
+	if _, err := Install(second, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := hookPush(t, second, 0, "origin", "main")
+	if err == nil {
+		t.Fatal("push accepted divergent notes")
+	}
+	if calls != "merge-notes --remote origin\n" {
+		t.Fatalf("git-attributed calls = %q", calls)
+	}
+	if got := strings.TrimSpace(hookGit(t, second, "rev-parse", "refs/notes/attributed")); got != localNotes {
+		t.Fatalf("hook fetch replaced local notes with %q, want %q", got, localNotes)
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/notes/attributed")); got != remoteNotes {
+		t.Fatalf("remote notes moved to %q, want %q", got, remoteNotes)
+	}
+	if got := strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main")); got != base {
+		t.Fatalf("remote HEAD advanced to %q, want %q", got, base)
+	}
+}
+
+// hookPush runs git push in root with the test binary standing in for
+// git-attributed in the installed hooks. It returns the git-attributed calls the
+// hooks made; each call exits with callExit.
+func hookPush(t *testing.T, root string, callExit int, args ...string) (string, error) {
+	t.Helper()
+	return hookRun(t, root, callExit, append([]string{"push"}, args...)...)
+}
+
+// hookRun is hookPush for any git command line run in dir.
+func hookRun(t *testing.T, dir string, callExit int, args ...string) (string, error) {
+	t.Helper()
+	calls := filepath.Join(t.TempDir(), "git-attributed-calls")
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ATTRIBUTED_NESTED=1",
+		"ATTRIBUTED_TEST_HOOK_HELPER=1",
+		"ATTRIBUTED_TEST_HOOK_LOG="+calls,
+		"ATTRIBUTED_TEST_HOOK_EXIT="+strconv.Itoa(callExit),
+	)
+	out, err := command.CombinedOutput()
+	if err != nil {
+		err = fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+	}
+	data, readErr := os.ReadFile(calls)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+	return string(data), err
+}
+
+func pushFixture(t *testing.T) (root, remote, oldRemoteHead string) {
+	t.Helper()
+	root = hookRepo(t)
+	remote = filepath.Join(t.TempDir(), "remote.git")
+	hookGit(t, root, "config", "user.name", "Test User")
+	hookGit(t, root, "config", "user.email", "test@example.invalid")
+	hookGit(t, root, "init", "--bare", remote)
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookGit(t, root, "add", "file.txt")
+	hookGit(t, root, "commit", "-m", "base")
+	hookGit(t, root, "remote", "add", "origin", remote)
+	hookGit(t, root, "push", "-u", "origin", "main")
+	oldRemoteHead = strings.TrimSpace(hookGit(t, remote, "rev-parse", "refs/heads/main"))
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("base\nchange\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookGit(t, root, "add", "file.txt")
+	hookGit(t, root, "commit", "-m", "change")
+	hookGit(t, root, "notes", "--ref=refs/notes/attributed", "add", "-m", "attribution", "HEAD")
+	return root, remote, oldRemoteHead
+}
+
+func readObject(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func hookRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookGit(t, root, "init", "-b", "main")
+	return root
+}
+
+func hookGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = root
+	command.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ATTRIBUTED_NESTED=1",
+	)
+	out, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+func TestRewriteHookCommandsFailContracts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		env     []string
+		input   string
+		args    []string
+		wantErr bool
+	}{
+		{
+			name:    "reference nested exits immediately",
+			command: referenceTransactionHookCommand("/bin/false"),
+			env:     []string{"GIT_ATTRIBUTED_NESTED=1"},
+			input:   "bad bad refs/heads/main\n",
+			args:    []string{"committed"},
+		},
+		{
+			name:    "reference irrelevant ref fails open",
+			command: referenceTransactionHookCommand("/bin/false"),
+			input:   "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 refs/tags/v1\n",
+			args:    []string{"committed"},
+		},
+		{
+			name:    "reference relevant ref fails open",
+			command: referenceTransactionHookCommand("/bin/false"),
+			input:   "0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 HEAD\n",
+			args:    []string{"committed"},
+		},
+		{
+			name:    "checkout fails open",
+			command: rewriteHookCommand("/bin/false", "post-checkout", false),
+			args:    []string{"old", "new", "1"},
+		},
+		{
+			name:    "merge fails closed",
+			command: rewriteHookCommand("/bin/false", "post-merge", true),
+			args:    []string{"0"},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{"-c", test.command, "git-attributed"}, test.args...)
+			command := exec.Command("sh", args...)
+			command.Stdin = strings.NewReader(test.input)
+			command.Env = append(os.Environ(), test.env...)
+			err := command.Run()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("command error = %v, want error %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestReferenceTransactionHookStartsAttributedOnlyWhenCommitted(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake binary is not executable on Windows")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "phases")
+	binary := filepath.Join(dir, "git-attributed")
+	fake := "#!/bin/sh\nprintf '%s\\n' \"$6\" >>'" + marker + "'\ncat >/dev/null\n"
+	if err := os.WriteFile(binary, []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userMarker := filepath.Join(dir, "user")
+	script := "#!/bin/sh\n" + blockStart + "\n" + referenceTransactionHookCommand(binary) + "\n" + blockEnd +
+		"\nprintf '%s\\n' \"$1\" >>'" + userMarker + "'\n"
+	phases := []string{"preparing", "prepared", "committed", "preparing", "aborted"}
+	for _, phase := range phases {
+		command := exec.Command("sh", "-c", script, "reference-transaction", phase)
+		command.Stdin = strings.NewReader("0000000000000000000000000000000000000000 1111111111111111111111111111111111111111 HEAD\n")
+		if out, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("hook %s: %v\n%s", phase, err, out)
+		}
+	}
+	started, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(started) != "committed\n" {
+		t.Fatalf("git-attributed started for phases %q, want only committed", started)
+	}
+	user, err := os.ReadFile(userMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(user) != strings.Join(phases, "\n")+"\n" {
+		t.Fatalf("user hook ran for phases %q, want %q", user, phases)
+	}
+}
+
+func TestReferenceTransactionCommandRejectsOtherBodies(t *testing.T) {
+	t.Parallel()
+	current := referenceTransactionHookCommand("/old/git-attributed")
+	tests := map[string]string{
+		"missing nested guard": strings.TrimPrefix(current, referenceTransactionNestedGuard),
+		"other command":        referenceTransactionNestedGuard + "echo hello",
+		"missing esac":         strings.TrimSuffix(current, "\nesac"),
+		"other phase":          strings.Replace(current, "committed) ", "prepared) ", 1),
+		"extra command":        strings.Replace(current, " ;;", " ; rm -rf / ;;", 1),
+	}
+	for name, command := range tests {
+		if isReferenceTransactionCommand(command) {
+			t.Errorf("%s: isReferenceTransactionCommand accepted %q", name, command)
+		}
+	}
+}
+
+func TestManagedRewriteBlocksAreRecognized(t *testing.T) {
+	t.Parallel()
+	commands := []string{
+		rewriteHookCommand("/old/git-attributed", "post-rewrite", true),
+		rewriteHookCommand("/old/git-attributed", "post-merge", true),
+		rewriteHookCommand("/old/git-attributed", "post-checkout", false),
+		referenceTransactionHookCommand("/old/git-attributed"),
+		// The block before phase filtering started git-attributed for every phase.
+		"if [ -n \"${GIT_ATTRIBUTED_NESTED:-}\" ]; then\n  exit 0\nfi\n" +
+			`'/old/git-attributed' rewrite --mode ref-txn --hook-input stdin "$@" || true`,
+	}
+	for _, command := range commands {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			block := blockStart + "\n" + command + "\n" + blockEnd
+			if !managedGitHookBlock(block) {
+				t.Fatalf("managedGitHookBlock rejected %q", command)
+			}
+		})
+	}
+}
+
+func TestHookAndConfigSizeCaps(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	config := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, bytes.Repeat([]byte("x"), maxHookBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "droid"}); err == nil {
+		t.Fatal("Install accepted oversized configuration")
+	}
+	hook := filepath.Join(root, ".git", "hooks", "post-commit")
+	if err := os.WriteFile(hook, append([]byte("#!/bin/sh\n"), bytes.Repeat([]byte("x"), maxHookBytes+1)...), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err == nil {
+		t.Fatal("Install accepted oversized hook")
+	}
+}
+
+func TestInstallRefreshesExistingBackup(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	config := filepath.Join(root, ".factory", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"custom":true}` + "\n")
+	if err := os.WriteFile(config, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config+".git-attributed.bak", []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "droid"}); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(config + ".git-attributed.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != string(original) {
+		t.Fatalf("backup = %q, want %q", backup, original)
+	}
+}
+
+func TestUninstallPreservesShapeOnlyGitHook(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".git", "hooks", "post-merge")
+	custom := "#!/bin/sh\n" + blockStart + "\n'/path/audit-wrapper' rewrite --mode post-merge --hook-input stdin \"$@\" || exit 1\n" + blockEnd + "\n"
+	if err := os.WriteFile(path, []byte(custom), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Uninstall(root, Options{Agent: "none", Git: true})
+	if err != nil || len(result.Changed) != 0 {
+		t.Fatalf("Uninstall() = %+v, %v", result, err)
+	}
+	if got := string(mustRead(t, path)); got != custom {
+		t.Fatalf("shape-only hook changed to %q", got)
+	}
+}
+
+func TestQuoteExecutableUsesLiteralSingleQuotes(t *testing.T) {
+	t.Parallel()
+	got := quoteExecutable(`/tmp/$(touch pwned)/git-attributed'`)
+	if !strings.Contains(got, "'\"'\"'") ||
+		strings.Contains(got, `$(touch pwned)`) == false {
+		t.Fatalf("quoteExecutable() = %q", got)
+	}
+}
+
+func TestPostMergeHookAnnotatesAndUpgradesOldBlock(t *testing.T) {
+	t.Parallel()
+	root := hookRepo(t)
+	path := filepath.Join(root, ".git", "hooks", "post-merge")
+	old := "#!/bin/sh\n" + blockStart + "\n" +
+		rewriteHookCommand("/old/git-attributed", "post-merge", true) + "\n" + blockEnd + "\n"
+	if err := os.WriteFile(path, []byte(old), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := string(mustRead(t, path))
+	if !strings.Contains(got, ` rewrite --mode post-merge --hook-input stdin "$@" || exit 1`) {
+		t.Fatalf("post-merge rewrite step missing: %q", got)
+	}
+	if !strings.Contains(got, " annotate || exit 1") {
+		t.Fatalf("post-merge annotate step missing: %q", got)
+	}
+	result, err := Install(root, Options{Agent: "none", Git: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range result.Changed {
+		if changed == path {
+			t.Fatal("second install rewrote an already managed post-merge hook")
+		}
+	}
+	if _, err := Uninstall(root, Options{Agent: "none", Git: true}); err != nil {
+		t.Fatal(err)
+	}
+	if after := string(mustRead(t, path)); strings.Contains(after, "attributed") {
+		t.Fatalf("uninstall left managed content behind: %q", after)
+	}
+}

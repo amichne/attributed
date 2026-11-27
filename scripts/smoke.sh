@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# Cross-platform release smoke test for a built git-attributed binary.
+#
+# Drives the real product flow against a throwaway repository: hooks,
+# checkpoints, annotation, blame, rebase and partial-commit regressions,
+# path edge cases, linked worktrees, reports, and note sharing. Runs on
+# Linux, macOS, and Windows (Git Bash) with no dependencies beyond Git and
+# POSIX tools.
+#
+# Usage: ATTRIBUTED_BIN=/path/to/git-attributed scripts/smoke.sh
+
+set -euo pipefail
+
+ATTRIBUTED_BIN="${ATTRIBUTED_BIN:-./git-attributed}"
+[[ -n "$ATTRIBUTED_BIN" ]] || { echo "ATTRIBUTED_BIN is required" >&2; exit 2; }
+[[ -x "$ATTRIBUTED_BIN" ]] || { echo "ATTRIBUTED_BIN is not executable: $ATTRIBUTED_BIN" >&2; exit 2; }
+
+# Attribution prefix the portable-cursor preset records in notes.
+AI_CURSOR="ai:cursor"
+
+fail() {
+  echo "SMOKE FAIL: $1" >&2
+  exit 1
+}
+
+step() {
+  echo "== $1"
+}
+
+# portable_json_check validates compact JSON output by required keys.
+# Smoke runs on runners without Python, so key greps stand in for a parser.
+require() {
+  # require <description> <haystack> <needle>
+  local description="$1" haystack="$2" needle="$3"
+  case "$haystack" in
+  *"$needle"*) ;;
+  *)
+    fail "$description: missing '$needle'"
+    ;;
+  esac
+}
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+BIN="$(cd "$(dirname "$ATTRIBUTED_BIN")" && pwd)/$(basename "$ATTRIBUTED_BIN")"
+
+step "version"
+require "version" "$("$BIN" version)" "git-attributed"
+
+REPO="$WORK/repo"
+git init -q -b main "$REPO" || fail "git init"
+cd "$REPO"
+git config user.name "Smoke Test"
+git config user.email "smoke.test@example.invalid"
+git config core.autocrlf false
+
+step "install hooks preserves user content and stays idempotent"
+mkdir -p .git/hooks
+printf '#!/bin/sh\necho USER-HOOK-RAN\n' >.git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+"$BIN" install-hooks --agent none --git >/dev/null || fail "install-hooks"
+"$BIN" install-hooks --agent none --git >/dev/null || fail "install-hooks rerun"
+grep -q "USER-HOOK-RAN" .git/hooks/pre-commit || fail "user hook lost"
+grep -q "attributed" .git/hooks/post-commit || fail "managed post-commit missing"
+[[ -f .git/hooks/pre-push ]] || fail "pre-push hook missing"
+
+step "AI and human attribution through the commit hook"
+printf 'ai alpha\nai beta\n' >app.txt
+printf '%s' '{"session_id":"smoke-ai","tool_name":"Write","tool_input":{"file_path":"app.txt"},"model":"smoke-model"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "ai checkpoint"
+printf 'seed line\n' >seed.txt
+printf '%s' '{"session_id":"smoke-human","tool_name":"Edit","tool_input":{"file_path":"seed.txt"}}' \
+  | "$BIN" checkpoint droid --type human --hook-input stdin >/dev/null || fail "human checkpoint"
+git add -A
+git commit -qm "feat: ai and human" || fail "first commit"
+BLAME="$("$BIN" blame app.txt)"
+require "ai blame" "$BLAME" "ai:claude/smoke-model"
+BLAME="$("$BIN" blame seed.txt)"
+require "human blame" "$BLAME" "human:smoke.test"
+"$BIN" verify >/dev/null || fail "verify after first commit"
+
+step "partial commit keeps excluded provenance"
+printf 'p1\n' >p1.txt
+printf '%s' '{"session_id":"p1","tool_name":"Write","tool_input":{"file_path":"p1.txt"},"model":"m"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "p1 checkpoint"
+printf 'p2\n' >p2.txt
+printf '%s' '{"session_id":"p2","tool_name":"Write","tool_input":{"file_path":"p2.txt"},"model":"m"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "p2 checkpoint"
+git add p1.txt
+git commit -qm "feat: only p1" || fail "partial commit"
+git add p2.txt
+git commit -qm "feat: p2 now" || fail "second partial commit"
+BLAME="$("$BIN" blame p2.txt)"
+require "partial commit provenance" "$BLAME" "ai:claude/m"
+
+step "rebase keeps attribution and the next commit annotates"
+git checkout -q -b feat || fail "branch feat"
+printf 'f1 line\n' >f1.txt
+printf '%s' '{"session_id":"f1","tool_name":"Write","tool_input":{"file_path":"f1.txt"},"model":"m"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "f1 checkpoint"
+git add -A
+git commit -qm "feat: f1" || fail "f1 commit"
+git checkout -q main || fail "back to main"
+printf 'main work\n' >mw.txt
+git add -A
+git commit -qm "feat: main work" || fail "main work commit"
+git checkout -q feat || fail "back to feat"
+git rebase -q main || fail "rebase"
+BLAME="$("$BIN" blame f1.txt)"
+require "rebase attribution" "$BLAME" "ai:claude/m"
+printf 'f2 line\n' >f2.txt
+printf '%s' '{"session_id":"f2","tool_name":"Write","tool_input":{"file_path":"f2.txt"},"model":"m"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "f2 checkpoint"
+git add -A
+git commit -qm "feat: f2 after rebase" || fail "commit after rebase"
+BLAME="$("$BIN" blame f2.txt)"
+require "commit after rebase" "$BLAME" "ai:claude/m"
+"$BIN" verify >/dev/null || fail "verify after rebase"
+git checkout -q main || fail "back to main for merge"
+git merge -q --no-ff -m "merge feat" feat || fail "merge"
+
+step "portable special paths"
+mkdir -p "dir with spaces/nested" "żółć" "dir(paren)" "dir#hash" "dir\$dollar"
+printf 'space content\n' >"dir with spaces/nested/some file.txt"
+printf 'unicode content\n' >"żółć/zażółć gęślą jaźń.txt"
+printf 'paren content\n' >"dir(paren)/(f).txt"
+printf 'hash content\n' >"dir#hash/f#ile.txt"
+printf 'dollar content\n' >'dir$dollar/$file.txt'
+printf '%s' '{"sessionId":"sp","toolName":"str_replace_based_edit","filePath":"dir with spaces/nested/some file.txt"}' \
+  | "$BIN" checkpoint portable-cursor --type ai --hook-input stdin >/dev/null || fail "cursor checkpoint"
+printf '%s' '{"sessionId":"sp2","toolName":"str_replace_based_edit","filePath":"żółć/zażółć gęślą jaźń.txt"}' \
+  | "$BIN" checkpoint portable-cursor --type ai --hook-input stdin >/dev/null || fail "cursor unicode checkpoint"
+printf 'a\r\nb\r\n' >crlf.txt
+printf '%s' '{"sessionId":"sp3","toolName":"str_replace_based_edit","filePath":"crlf.txt"}' \
+  | "$BIN" checkpoint portable-cursor --type ai --hook-input stdin >/dev/null || fail "cursor crlf checkpoint"
+git add -A
+git commit -qm "feat: special paths" || fail "special paths commit"
+BLAME="$("$BIN" blame "dir with spaces/nested/some file.txt")"
+require "space path blame" "$BLAME" "$AI_CURSOR"
+BLAME="$("$BIN" blame "żółć/zażółć gęślą jaźń.txt")"
+require "unicode path blame" "$BLAME" "$AI_CURSOR"
+BLAME="$("$BIN" blame crlf.txt)"
+require "crlf blame" "$BLAME" "$AI_CURSOR"
+
+step "cwd-relative blame from a subdirectory"
+cd "dir with spaces" || fail "cd subdir"
+BLAME="$("$BIN" blame "nested/some file.txt")"
+require "cwd-relative blame" "$BLAME" "$AI_CURSOR"
+BLAME="$("$BIN" blame "dir with spaces/nested/some file.txt")"
+require "root-relative blame" "$BLAME" "$AI_CURSOR"
+cd "$REPO" || fail "cd back"
+
+step "agent hook in the main checkout records edits in linked worktrees"
+printf '.worktrees/\n' >>.git/info/exclude
+git worktree add -q .worktrees/wt -b wt-nested || fail "nested worktree"
+git worktree add -q "$WORK/wt-sibling" -b wt-sibling || fail "sibling worktree"
+for WT in "$REPO/.worktrees/wt" "$WORK/wt-sibling"; do
+  # The native binary reads the payload path, so Git Bash paths need converting.
+  WT_FILE="$WT/wt.txt"
+  if command -v cygpath >/dev/null 2>&1; then
+    WT_FILE="$(cygpath -m "$WT_FILE")"
+  fi
+  PAYLOAD="$(printf '{"session_id":"wt","model":"wt-model","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$WT_FILE")"
+  printf 'wt base\n' >"$WT/wt.txt"
+  WARN="$(printf '%s' "$PAYLOAD" | "$BIN" checkpoint portable-factory --type human --hook-input stdin 2>&1 >/dev/null)" ||
+    fail "worktree human checkpoint"
+  [[ -z "$WARN" ]] || fail "worktree human checkpoint warned: $WARN"
+  printf 'wt base\nwt agent\n' >"$WT/wt.txt"
+  WARN="$(printf '%s' "$PAYLOAD" | "$BIN" checkpoint portable-factory --type ai --hook-input stdin 2>&1 >/dev/null)" ||
+    fail "worktree ai checkpoint"
+  [[ -z "$WARN" ]] || fail "worktree ai checkpoint warned: $WARN"
+  git -C "$WT" add wt.txt || fail "worktree add"
+  git -C "$WT" commit -qm "feat: agent line in a worktree" || fail "worktree commit"
+  BLAME="$(cd "$WT" && "$BIN" blame wt.txt)"
+  require "linked worktree blame" "$BLAME" "ai:factory/wt-model"
+done
+
+step "reports and policy"
+"$BIN" stats >/dev/null || fail "stats"
+"$BIN" stats --json | grep -q '"lines"' || fail "stats json"
+"$BIN" verify --deep >/dev/null || fail "verify deep"
+"$BIN" check --max-untracked-percent 100 >/dev/null || fail "check pass"
+if "$BIN" check --max-ai-percent 0 >/dev/null 2>&1; then
+  fail "check must exit 1 when the policy is violated"
+fi
+"$BIN" disclosure >/dev/null || fail "disclosure json"
+"$BIN" disclosure --format spdx | grep -q '"spdxId"' || fail "disclosure spdx"
+"$BIN" disclosure --format cyclonedx | grep -q '"components"' || fail "disclosure cyclonedx"
+"$BIN" export --format gitai | grep -q '"schema_version":"authorship/3.0.0"' || fail "export gitai"
+"$BIN" export --format agent-trace | grep -q '"vcs"' || fail "export agent-trace"
+
+step "dashboard is self-contained and refuses replacement"
+"$BIN" dashboard --output "$WORK/report.html" >/dev/null || fail "dashboard"
+grep -q "Content-Security-Policy" "$WORK/report.html" || fail "dashboard CSP missing"
+if grep -Eq 'https?://' "$WORK/report.html"; then
+  fail "dashboard references an external URL"
+fi
+if "$BIN" dashboard --output "$WORK/report.html" >/dev/null 2>&1; then
+  fail "dashboard replaced an existing output"
+fi
+
+step "notes follow an ordinary push"
+git init -q --bare "$WORK/remote.git" || fail "bare remote"
+# Receiving a push can start a detached gc that repacks and deletes loose
+# objects while a later step reads them. Keep the remote's objects stable.
+git --git-dir="$WORK/remote.git" config receive.autogc false || fail "remote receive.autogc"
+git remote add origin "$WORK/remote.git" || fail "remote add"
+git push -q origin main || fail "push main"
+git --git-dir="$WORK/remote.git" notes --ref=attributed list >/dev/null || fail "notes list"
+NOTES_COUNT="$(git --git-dir="$WORK/remote.git" notes --ref=attributed list | wc -l | tr -d ' ')"
+[[ "$NOTES_COUNT" -ge 1 ]] || fail "notes missing on remote: $NOTES_COUNT"
+
+step "pre-push merges notes another clone pushed"
+# The other clone plays a teammate or the forge job. An empty template keeps
+# hooks from a user-level Git template out of it. --no-local fetches through
+# the file transport instead of copying loose objects, so a background gc in
+# the remote cannot make the clone read a vanished object.
+OTHER="$WORK/other"
+git clone -q --no-local --template= "$WORK/remote.git" "$OTHER" || fail "clone other"
+git -C "$OTHER" config user.name "Other Clone"
+git -C "$OTHER" config user.email "other.clone@example.invalid"
+git -C "$OTHER" config core.autocrlf false
+git -C "$OTHER" fetch -q origin refs/notes/attributed:refs/notes/attributed || fail "other fetch notes"
+git -C "$OTHER" checkout -q -b side || fail "other side branch"
+printf 'side\n' >"$OTHER/side.txt"
+git -C "$OTHER" add side.txt
+git -C "$OTHER" commit -qm "feat: side" || fail "other side commit"
+SIDE="$(git -C "$OTHER" rev-parse HEAD)"
+git -C "$OTHER" notes --ref=attributed add -m "other clone note" "$SIDE" || fail "other note"
+git -C "$OTHER" push -q origin side refs/notes/attributed || fail "other push"
+printf 'merge line\n' >merge.txt
+printf '%s' '{"session_id":"m1","tool_name":"Write","tool_input":{"file_path":"merge.txt"},"model":"m"}' \
+  | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "merge checkpoint"
+git add merge.txt
+git commit -qm "feat: after other clone" || fail "commit after other clone"
+MERGED="$(git rev-parse HEAD)"
+PUSH_OUT="$(git push -q origin main 2>&1)" || fail "push with diverged notes: $PUSH_OUT"
+require "notes merge message" "$PUSH_OUT" "git-attributed: merged remote attribution notes, 1 added"
+require "merged local notes" "$(git notes --ref=attributed list)" "$SIDE"
+REMOTE_NOTES="$(git --git-dir="$WORK/remote.git" notes --ref=attributed list)"
+require "other clone note on remote" "$REMOTE_NOTES" "$SIDE"
+require "new note on remote" "$REMOTE_NOTES" "$MERGED"
+if git show-ref --verify --quiet refs/worktree/attributed/remote-notes; then
+  fail "fetched notes ref left behind"
+fi
+
+step "pre-push fast-forwards notes that are behind"
+git -C "$OTHER" fetch -q origin refs/notes/attributed:refs/notes/attributed || fail "other fetch merged notes"
+printf 'side two\n' >>"$OTHER/side.txt"
+git -C "$OTHER" commit -qam "feat: side two" || fail "other second commit"
+SIDE_TWO="$(git -C "$OTHER" rev-parse HEAD)"
+git -C "$OTHER" notes --ref=attributed add -m "other clone second note" "$SIDE_TWO" || fail "other second note"
+git -C "$OTHER" push -q origin side refs/notes/attributed || fail "other second push"
+PUSH_OUT="$(git push -q origin HEAD:refs/heads/notes-behind 2>&1)" || fail "push with notes behind: $PUSH_OUT"
+require "notes fast-forward message" "$PUSH_OUT" "git-attributed: updated attribution notes from the remote, 1 added"
+[[ "$(git rev-parse refs/notes/attributed)" == "$(git --git-dir="$WORK/remote.git" rev-parse refs/notes/attributed)" ]] ||
+  fail "local notes did not fast-forward to the remote"
+
+step "conflicting notes stop the push and change nothing"
+# --no-verify sends the commit without its note, then the other clone writes
+# a different note for it. Both sides now added a note for one commit.
+printf 'conflict line\n' >conflict.txt
+git add conflict.txt
+git commit -qm "feat: note on both sides" || fail "commit before conflict"
+CONFLICTED="$(git rev-parse HEAD)"
+git push -q --no-verify origin main || fail "push branch without notes"
+git -C "$OTHER" fetch -q origin main refs/notes/attributed:refs/notes/attributed || fail "other fetch main"
+git -C "$OTHER" notes --ref=attributed add -m "conflicting note" "$CONFLICTED" || fail "conflicting note"
+git -C "$OTHER" push -q origin refs/notes/attributed || fail "other push conflicting note"
+printf 'after conflict\n' >>conflict.txt
+git commit -qam "feat: push after conflict" || fail "commit after conflict"
+REMOTE_NOTES="$(git --git-dir="$WORK/remote.git" rev-parse refs/notes/attributed)"
+REMOTE_MAIN="$(git --git-dir="$WORK/remote.git" rev-parse refs/heads/main)"
+LOCAL_NOTES="$(git rev-parse refs/notes/attributed)"
+if PUSH_OUT="$(git push -q origin main 2>&1)"; then
+  fail "push went through conflicting notes"
+fi
+require "conflict names the commit" "$PUSH_OUT" "differ for commit $CONFLICTED"
+require "conflict help" "$PUSH_OUT" \
+  'git -c fetch.fsckObjects=true fetch --no-tags --refmap= "$(git remote get-url --push origin)" +refs/notes/attributed:refs/notes/attributed-remote'
+[[ "$(git rev-parse refs/notes/attributed)" == "$LOCAL_NOTES" ]] || fail "conflict changed local notes"
+[[ "$(git --git-dir="$WORK/remote.git" rev-parse refs/notes/attributed)" == "$REMOTE_NOTES" ]] ||
+  fail "conflict changed remote notes"
+[[ "$(git --git-dir="$WORK/remote.git" rev-parse refs/heads/main)" == "$REMOTE_MAIN" ]] ||
+  fail "branch went out despite the notes conflict"
+if git show-ref --verify --quiet refs/worktree/attributed/remote-notes; then
+  fail "fetched notes ref left behind after conflict"
+fi
+if git rev-parse --verify --quiet NOTES_MERGE_PARTIAL >/dev/null; then
+  fail "conflict left a notes merge in progress"
+fi
+
+step "the printed manual steps resolve the conflict"
+# A notes fetch refspec makes a plain fetch of the notes overwrite the local
+# ones, so the printed fetch must keep them.
+git config --add remote.origin.fetch '+refs/notes/*:refs/notes/*'
+KEPT_NOTE="$(git notes --ref=attributed show "$CONFLICTED")"
+OUT="$(git -c fetch.fsckObjects=true fetch --no-tags --refmap= "$(git remote get-url --push origin)" \
+  +refs/notes/attributed:refs/notes/attributed-remote 2>&1)" || fail "manual notes fetch: $OUT"
+[[ "$(git rev-parse refs/notes/attributed)" == "$LOCAL_NOTES" ]] || fail "manual fetch replaced local notes"
+[[ "$(git notes --ref=refs/notes/attributed-remote show "$CONFLICTED")" == "conflicting note" ]] ||
+  fail "compare step did not show the remote note"
+if git notes --ref=refs/notes/attributed merge --strategy=manual refs/notes/attributed-remote >/dev/null 2>&1; then
+  fail "manual notes merge did not stop at the conflict"
+fi
+MERGE_DIR="$(git rev-parse --git-path NOTES_MERGE_WORKTREE)"
+[[ -f "$MERGE_DIR/$CONFLICTED" ]] || fail "manual notes merge did not name the conflicted commit"
+# Keep the local note, like a reviewer who checked both sides.
+git notes --ref=refs/notes/attributed show "$CONFLICTED" >"$MERGE_DIR/$CONFLICTED" || fail "resolve conflict"
+git notes --ref=refs/notes/attributed merge --commit || fail "commit manual notes merge"
+git update-ref -d refs/notes/attributed-remote || fail "remove fetched notes"
+PUSH_OUT="$(git push -q origin main 2>&1)" || fail "push after manual notes merge: $PUSH_OUT"
+[[ "$(git --git-dir="$WORK/remote.git" rev-parse refs/heads/main)" == "$(git rev-parse HEAD)" ]] ||
+  fail "branch did not go out after the manual merge"
+[[ "$(git --git-dir="$WORK/remote.git" rev-parse refs/notes/attributed)" == "$(git rev-parse refs/notes/attributed)" ]] ||
+  fail "notes did not go out after the manual merge"
+[[ "$(git --git-dir="$WORK/remote.git" notes --ref=attributed show "$CONFLICTED")" == "$KEPT_NOTE" ]] ||
+  fail "manual merge lost the kept note"
+
+step "a remote rewrite of a local note stops the push"
+# git notes merge would take this change, because only the remote side
+# touched the note. git-attributed never replaces an existing note on its own.
+MERGED_NOTE="$(git notes --ref=attributed show "$MERGED")"
+git -C "$OTHER" fetch -q origin refs/notes/attributed:refs/notes/attributed || fail "other fetch resolved notes"
+git -C "$OTHER" notes --ref=attributed add -f -m "rewritten note" "$MERGED" || fail "rewrite note"
+git -C "$OTHER" push -q origin refs/notes/attributed || fail "other push rewritten note"
+if PUSH_OUT="$(git push -q origin HEAD:refs/heads/notes-rewritten 2>&1)"; then
+  fail "push went through a rewritten note"
+fi
+require "rewrite names the commit" "$PUSH_OUT" "differ for commit $MERGED"
+[[ "$(git notes --ref=attributed show "$MERGED")" == "$MERGED_NOTE" ]] || fail "remote rewrite replaced the local note"
+if git --git-dir="$WORK/remote.git" show-ref --verify --quiet refs/heads/notes-rewritten; then
+  fail "branch went out despite the rewritten note"
+fi
+if git show-ref --verify --quiet refs/worktree/attributed/remote-notes; then
+  fail "fetched notes ref left behind after the rewrite"
+fi
+
+step "uninstall removes managed hooks only"
+"$BIN" uninstall --git >/dev/null || fail "uninstall"
+grep -q "USER-HOOK-RAN" .git/hooks/pre-commit || fail "user hook deleted"
+if grep -q "attributed" .git/hooks/post-commit 2>/dev/null; then
+  fail "managed block left in post-commit"
+fi
+[[ ! -f .git/hooks/pre-push ]] || fail "pre-push left behind"
+
+echo
+echo "SMOKE OK"

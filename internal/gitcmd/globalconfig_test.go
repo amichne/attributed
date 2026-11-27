@@ -1,0 +1,167 @@
+package gitcmd
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestGlobalConfigRoundTrip exercises the user-level configuration helpers
+// against an isolated global configuration file.
+func TestGlobalConfigRoundTrip(t *testing.T) {
+	xdg := setupGlobalConfig(t)
+
+	if value, exists, err := GlobalConfig("init.templateDir"); err != nil || exists || value != "" {
+		t.Fatalf("missing key = %q, %v, %v", value, exists, err)
+	}
+	if err := SetGlobalConfig("init.templateDir", filepath.Join(xdg, "tpl")); err != nil {
+		t.Fatal(err)
+	}
+	if value, exists, err := GlobalConfig("init.templateDir"); err != nil || !exists ||
+		value != filepath.Join(xdg, "tpl") {
+		t.Fatalf("set key = %q, %v, %v", value, exists, err)
+	}
+	if err := SetGlobalConfig("init.templateDir", filepath.Join(xdg, "other")); err != nil {
+		t.Fatal(err)
+	}
+	if value, _, err := GlobalConfig("init.templateDir"); err != nil || value != filepath.Join(xdg, "other") {
+		t.Fatalf("replaced key = %q, %v", value, err)
+	}
+}
+
+func TestUnsetGlobalConfigDuplicate(t *testing.T) {
+	xdg := setupGlobalConfig(t)
+	if err := SetGlobalConfig("init.templateDir", filepath.Join(xdg, "other")); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(xdg, "managed")
+	if _, err := runGitOutsideRepo(
+		"add global git config",
+		"config", globalConfig, "--add", "init.templateDir", managed,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGitOutsideRepo(
+		"add global git config",
+		"config", globalConfig, "--add", "init.templateDir", managed,
+	); err != nil {
+		t.Fatal(err)
+	}
+	existed, err := UnsetGlobalConfig("init.templateDir", managed)
+	if err != nil || !existed {
+		t.Fatalf("unset = %v, %v", existed, err)
+	}
+	if value, exists, err := GlobalConfig("init.templateDir"); err != nil || !exists ||
+		value != filepath.Join(xdg, "other") {
+		t.Fatalf("foreign value = %q, %v, %v", value, exists, err)
+	}
+	if existed, err := UnsetGlobalConfig("init.templateDir", managed); err != nil || existed {
+		t.Fatalf("unset again = %v, %v", existed, err)
+	}
+	if existed, err := UnsetGlobalConfig("init.templateDir", filepath.Join(xdg, "other")); err != nil || !existed {
+		t.Fatalf("unset foreign = %v, %v", existed, err)
+	}
+	if _, exists, err := GlobalConfig("init.templateDir"); err != nil || exists {
+		t.Fatalf("removed key = %v, %v", exists, err)
+	}
+}
+
+func setupGlobalConfig(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "git", "config"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return xdg
+}
+
+func TestGlobalConfigReadsIncludes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	gitDir := filepath.Join(xdg, "git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	included := filepath.Join(xdg, "included")
+	value := filepath.Join(xdg, "included-template")
+	runGit(t, xdg, "config", "--file", included, "init.templateDir", value)
+	runGit(t, xdg, "config", "--file", filepath.Join(gitDir, "config"), "include.path", included)
+
+	if current, exists, err := GlobalConfig("init.templateDir"); err != nil || !exists || current != value {
+		t.Fatalf("included value = %q, %v, %v", current, exists, err)
+	}
+	if removed, err := UnsetGlobalConfig("init.templateDir", value); err == nil || removed {
+		t.Fatalf("removed included value = %v, %v", removed, err)
+	}
+	if err := AddGlobalConfig("init.templateDir", value); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := UnsetGlobalConfig("init.templateDir", value); err == nil || !removed {
+		t.Fatalf("missed included duplicate = %v, %v", removed, err)
+	}
+}
+
+func TestGlobalConfigRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "read empty key",
+			run: func() error {
+				_, _, err := GlobalConfig("")
+				return err
+			},
+		},
+		{
+			name: "set empty key",
+			run:  func() error { return SetGlobalConfig("", "value") },
+		},
+		{
+			name: "set NUL value",
+			run:  func() error { return SetGlobalConfig("test.key", "bad\x00value") },
+		},
+		{
+			name: "add empty key",
+			run:  func() error { return AddGlobalConfig("", "value") },
+		},
+		{
+			name: "add NUL value",
+			run:  func() error { return AddGlobalConfig("test.key", "bad\x00value") },
+		},
+		{
+			name: "unset empty key",
+			run: func() error {
+				_, err := UnsetGlobalConfig("", "value")
+				return err
+			},
+		},
+		{
+			name: "unset NUL value",
+			run: func() error {
+				_, err := UnsetGlobalConfig("test.key", "bad\x00value")
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); err == nil {
+				t.Fatal("invalid global config input was accepted")
+			}
+		})
+	}
+
+	if err := validateGlobalConfigKey("valid.key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGlobalConfigKey(""); err == nil {
+		t.Fatal("empty key was accepted")
+	}
+}
