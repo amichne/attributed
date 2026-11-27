@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'gofmt needed:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 -timeout=15m ./...
+
+      - name: Build
+        run: go build -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/git-attributed" ./cmd/git-attributed
+
+      - name: License notices ship in the binary
+        run: |
+          "$RUNNER_TEMP/git-attributed" license | grep -q 'Copyright (c) 2026 Austin Michne'
+          "$RUNNER_TEMP/git-attributed" license | grep -q 'Copyright (c) 2026 Comarch S.A.'
+
+      - name: Smoke
+        run: ATTRIBUTED_BIN="$RUNNER_TEMP/git-attributed" bash scripts/smoke.sh
+
+  tools:
+    name: Python tools and projection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/toolchain
+
+      - name: Ruff
+        working-directory: tools
+        run: |
+          uvx ruff@0.17.6 check .
+          uvx ruff@0.17.6 format --check .
+
+      - name: Pyright
+        working-directory: tools
+        run: uvx --with pytest==8.4.2 pyright@1.1.414 -p pyrightconfig.json
+
+      - name: Pytest
+        working-directory: tools
+        run: |
+          for suite in projection toolchain upstream-import; do
+            (cd "$suite" && uv run --no-project --with pytest==8.4.2 python -m pytest -q -p no:cacheprovider .)
+          done
+
+      - name: Projected integrations match their source
+        run: uv run --locked --script tools/projection/project.py check
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate
+        working-directory: docs
+        run: |
+          npx --yes mint@4.2.879 validate
+          npx --yes mint@4.2.879 broken-links
