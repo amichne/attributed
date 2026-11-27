@@ -53,7 +53,88 @@ files: Listing<File>(isDistinctBy((it) -> it.path)) = new {
   }
 }
 
+/// One file of a provider branch tree, at a path relative to that tree.
+class ProviderFile {
+  path: String(matches(Regex(#"[A-Za-z0-9_.][A-Za-z0-9._-]*(/[A-Za-z0-9_.][A-Za-z0-9._-]*)*"#)))
+  text: String
+}
+
+local byPath: Map<String, File> = files.toList().toMap((it) -> it.path, (it) -> it)
+local plugin = Integrations.plugin
+local market = Integrations.marketplace
+local pluginRoot = "marketplace/git-attributed"
+local bundled = List("README.md", "LICENSE", "commands/git-attributed-setup.md", "skills/git-attributed/SKILL.md")
+
+/// A provider file whose bytes are the projected repository file at source.
+local function copied(target: String, source: String): ProviderFile = new {
+  path = target
+  text = byPath[source].text
+}
+
+local function rendered(target: String, value: Dynamic): ProviderFile = new {
+  path = target
+  text = json.renderDocument(value)
+}
+
+/// The plugin directory that a Claude Code or Factory marketplace lists.
+local function bundle(manifestDirectory: String): Listing<ProviderFile> = new {
+  copied("plugins/\(plugin.name)/\(manifestDirectory)/plugin.json", "\(pluginRoot)/\(manifestDirectory)/plugin.json")
+  for (name in bundled) {
+    copied("plugins/\(plugin.name)/\(name)", "\(pluginRoot)/\(name)")
+  }
+}
+
+/// The tree published to each `harness/<provider>` branch.
+providers: Mapping<"claude"|"factory"|"gemini", Listing<ProviderFile>(isDistinctBy((it) -> it.path))> = new {
+  ["claude"] = (bundle(".claude-plugin")) {
+    rendered(".claude-plugin/marketplace.json", new Dynamic {
+      name = market.name
+      description = market.description
+      owner { name = market.owner }
+      plugins {
+        new {
+          name = plugin.name
+          source = "./plugins/\(plugin.name)"
+          description = plugin.description
+          category = market.category
+          homepage = plugin.homepage
+          keywords = plugin.keywords
+        }
+      }
+    })
+  }
+  ["factory"] = (bundle(".factory-plugin")) {
+    rendered(".factory-plugin/marketplace.json", new Dynamic {
+      name = market.name
+      description = market.description
+      owner { name = market.owner }
+      plugins {
+        new {
+          name = plugin.name
+          description = plugin.description
+          source = "./plugins/\(plugin.name)"
+          category = market.category
+          homepage = plugin.homepage
+          tags = plugin.keywords
+        }
+      }
+    })
+  }
+  ["gemini"] = new {
+    rendered("gemini-extension.json", new Dynamic {
+      name = plugin.name
+      version = plugin.version
+      description = plugin.description
+    })
+    copied("commands/git-attributed-setup.toml", "commands/git-attributed-setup.toml")
+    copied("LICENSE", "\(pluginRoot)/LICENSE")
+  }
+}
+
 output {
   renderer = new JsonRenderer {}
-  value = new Dynamic { files = module.files }
+  value = new Dynamic {
+    files = module.files
+    providers = module.providers
+  }
 }

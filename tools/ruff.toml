@@ -1,7 +1,7 @@
 line-length = 100
 target-version = "py312"
 # Each tool directory imports its own module in its tests.
-src = ["projection", "toolchain", "upstream-import"]
+src = ["projection", "publish", "toolchain", "upstream-import"]
 
 [lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ANN", "PT", "PL", "TC"]

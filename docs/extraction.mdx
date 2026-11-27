@@ -112,8 +112,22 @@ The installers and the `update` hook refresh used the same paths until slice 4 r
 A projected file proves only what the package contains. Harness discovery and hook delivery still need evidence from a live session. These gaps remain:
 
 - No release exists. The setup commands find `git-attributed` on `PATH` and stop if it is missing. The OpenCode setup command still downloads its plugin from a release tag, so that step fails until a release exists.
-- The repository publishes no Claude Code or Factory marketplace listing and no Gemini extension manifest, so the package installs in the harness README do not work yet.
+- The Factory and Gemini CLI installs from their harness branches have not been run. Claude Code's validator accepts the `harness/claude` tree, but no live install has been run either.
 - `git-attributed install-hooks` writes the Claude Code and Factory hooks from Go in `internal/hooks`. The projection does not own those hooks.
+
+### Publish marketplaces
+
+The projection also emits one tree per provider branch, again following Slopsentral. `project.py publish --provider claude|factory|gemini --out DIR` writes that tree. Each tree carries its own `projection-lock.json`:
+
+| Branch | Contents | Install |
+| --- | --- | --- |
+| `harness/claude` | `.claude-plugin/marketplace.json` and `plugins/git-attributed/` with its Claude manifest | `claude plugin marketplace add 'https://github.com/amichne/attributed.git#harness/claude'`, then `claude plugin install git-attributed@attributed` |
+| `harness/factory` | `.factory-plugin/marketplace.json` and `plugins/git-attributed/` with its Factory manifest | Register the branch as a Factory plugin marketplace |
+| `harness/gemini` | `gemini-extension.json`, `commands/git-attributed-setup.toml`, and `LICENSE` | `gemini extensions install https://github.com/amichne/attributed --ref harness/gemini` |
+
+Each plugin file in a provider tree is the projected file from `marketplace/git-attributed/`, so the trees cannot drift from the committed plugin. `Integrations.pkl` holds the listing metadata.
+
+`.github/workflows/publish-marketplaces.yml` runs on each push to `main`. It provisions the pinned toolchain, checks the committed projection, projects each provider tree, and runs `tools/publish/publish.py`. The publisher is adapted from Slopsentral's `tools/publish.py`. It accepts only the expected tree shape for each branch. It skips publication when `main` has moved past the projected commit, and it refuses a target branch that lacks a `Source-Commit` trailer or would move backward. Each publication commit records the source in that trailer, and an unchanged tree produces no commit. Its tests use a local bare remote. They cover a first orphan publication, an unchanged republish, an advance, a stale source, a branch without provenance, and rejected tree shapes.
 
 ### Remove out-of-scope producers
 

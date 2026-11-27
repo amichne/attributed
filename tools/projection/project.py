@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 PKL_VERSION: Final = "0.33.0"
 OWNED_ROOTS: Final = ("marketplace", "commands")
 LOCK_PATH: Final = "marketplace/projection-lock.json"
+PROVIDERS: Final = ("claude", "factory", "gemini")
+PROVIDER_LOCK_PATH: Final = "projection-lock.json"
 ASSET_ROOT: Final = "integrations/assets/"
 SOURCE_DIRS: Final = ("integrations",)
 SOURCE_FILES: Final = (
@@ -83,18 +85,43 @@ class PlannedFile:
     seals: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProviderFile:
+    """One file of a provider branch tree, at a path relative to that tree."""
+
+    path: str
+    text: str
+
+
+@dataclass(frozen=True)
+class Plan:
+    files: tuple[PlannedFile, ...]
+    providers: Mapping[str, tuple[ProviderFile, ...]]
+
+
+@dataclass(frozen=True)
+class Projected:
+    """The repository tree and one tree per provider branch, each with a lock."""
+
+    repository: Mapping[str, bytes]
+    providers: Mapping[str, Mapping[str, bytes]]
+
+
 # ---- pure core -------------------------------------------------------------
 
 
-def safe_path(path: str) -> bool:
+def relative_path(path: str) -> bool:
     pure = PurePosixPath(path)
     return (
         not pure.is_absolute()
         and str(pure) == path
         and all(part not in ("", ".", "..") for part in pure.parts)
-        and len(pure.parts) >= 2
-        and pure.parts[0] in OWNED_ROOTS
     )
+
+
+def safe_path(path: str) -> bool:
+    pure = PurePosixPath(path)
+    return relative_path(path) and len(pure.parts) >= 2 and pure.parts[0] in OWNED_ROOTS
 
 
 def _object(value: object, keys: set[str]) -> dict[str, object]:
@@ -119,21 +146,29 @@ def _string(value: object) -> str:
     return value
 
 
-def parse_plan(raw: str) -> list[PlannedFile]:
+def parse_plan(raw: str) -> Plan:
     try:
         document: object = json.loads(raw)
     except json.JSONDecodeError as error:
         raise Rejected("validate", "INVALID_PLAN") from error
+    top = _object(document, {"files", "providers"})
     planned: list[PlannedFile] = []
-    for value in _list(_object(document, {"files"})["files"]):
+    for value in _list(top["files"]):
         entry = _object(value, {"path", "text", "seals"})
         seals = tuple(_string(item) for item in _list(entry["seals"]))
         planned.append(PlannedFile(_string(entry["path"]), _string(entry["text"]), seals))
-    return planned
+    providers: dict[str, tuple[ProviderFile, ...]] = {}
+    for name, listing in _object(top["providers"], set(PROVIDERS)).items():
+        files: list[ProviderFile] = []
+        for value in _list(listing):
+            entry = _object(value, {"path", "text"})
+            files.append(ProviderFile(_string(entry["path"]), _string(entry["text"])))
+        providers[name] = tuple(files)
+    return Plan(tuple(planned), providers)
 
 
-def validate_plan(planned: Sequence[PlannedFile], frozen: Frozen) -> None:
-    paths = [item.path for item in planned]
+def validate_plan(plan: Plan, frozen: Frozen) -> None:
+    paths = [item.path for item in plan.files]
     for path in paths:
         if not safe_path(path) or path == LOCK_PATH:
             raise Rejected("validate", "UNSAFE_PATH", path)
@@ -143,6 +178,13 @@ def validate_plan(planned: Sequence[PlannedFile], frozen: Frozen) -> None:
     for source in frozen.files:
         if source.startswith(ASSET_ROOT) and source.removeprefix(ASSET_ROOT) not in declared:
             raise Rejected("validate", "UNDECLARED_ASSET", source)
+    for name, files in plan.providers.items():
+        provider_paths = [item.path for item in files]
+        for path in provider_paths:
+            if not relative_path(path) or path == PROVIDER_LOCK_PATH:
+                raise Rejected("validate", "UNSAFE_PATH", f"{name}:{path}")
+        if len(provider_paths) != len(set(provider_paths)):
+            raise Rejected("validate", "DUPLICATE_PATH", name)
 
 
 def seal_digests(planned: Sequence[PlannedFile]) -> dict[str, str]:
@@ -179,16 +221,25 @@ def verify_sealed(
             raise Rejected("seal", "SEAL_UNSTABLE", reference)
 
 
-def render_tree(planned: Sequence[PlannedFile], frozen: Frozen) -> dict[str, bytes]:
-    tree = {item.path: item.text.encode("utf-8") for item in planned}
+def with_lock(tree: dict[str, bytes], frozen: Frozen, lock_path: str) -> dict[str, bytes]:
+    """Add a lock that records the source digest and every file digest."""
     lock = {
         "version": 1,
         "pkl": PKL_VERSION,
         "sourceSha": frozen.digest,
         "files": {path: hashlib.sha256(tree[path]).hexdigest() for path in sorted(tree)},
     }
-    tree[LOCK_PATH] = (json.dumps(lock, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    tree[lock_path] = (json.dumps(lock, indent=2, sort_keys=True) + "\n").encode("utf-8")
     return tree
+
+
+def render_tree(planned: Sequence[PlannedFile], frozen: Frozen) -> dict[str, bytes]:
+    return with_lock({item.path: item.text.encode("utf-8") for item in planned}, frozen, LOCK_PATH)
+
+
+def render_provider(files: Sequence[ProviderFile], frozen: Frozen) -> dict[str, bytes]:
+    tree = {item.path: item.text.encode("utf-8") for item in files}
+    return with_lock(tree, frozen, PROVIDER_LOCK_PATH)
 
 
 def drift(projected: Mapping[str, bytes], committed: Mapping[str, bytes]) -> list[str]:
@@ -266,7 +317,7 @@ def resolve_pkl(pkl: str) -> str:
     return str(Path(resolved).absolute())
 
 
-def evaluate(pkl: str, frozen_root: Path, digests: Mapping[str, str]) -> list[PlannedFile]:
+def evaluate(pkl: str, frozen_root: Path, digests: Mapping[str, str]) -> Plan:
     command = [
         pkl,
         "eval",
@@ -312,7 +363,7 @@ def pkl_location(stderr: str, frozen_root: Path) -> str:
     return ""
 
 
-def project(repo: Path, pkl: str) -> dict[str, bytes]:
+def project(repo: Path, pkl: str) -> Projected:
     frozen = freeze(repo)
     pkl = resolve_pkl(pkl)
     with tempfile.TemporaryDirectory(prefix="attributed-projection-") as scratch:
@@ -320,12 +371,16 @@ def project(repo: Path, pkl: str) -> dict[str, bytes]:
         materialize(frozen_root, frozen.files)
         unsealed = evaluate(pkl, frozen_root, {})
         validate_plan(unsealed, frozen)
-        digests = seal_digests(unsealed)
+        digests = seal_digests(unsealed.files)
         sealed = evaluate(pkl, frozen_root, digests) if digests else unsealed
-        verify_sealed(unsealed, sealed, digests)
+        validate_plan(sealed, frozen)
+        verify_sealed(unsealed.files, sealed.files, digests)
     if freeze(repo).digest != frozen.digest:
         raise Rejected("freeze", "CHANGED_INPUT")
-    return render_tree(sealed, frozen)
+    return Projected(
+        render_tree(sealed.files, frozen),
+        {name: render_provider(files, frozen) for name, files in sealed.providers.items()},
+    )
 
 
 def committed_tree(repo: Path) -> dict[str, bytes]:
@@ -400,14 +455,21 @@ def main(argv: Sequence[str]) -> int:
     commands.add_parser("check", help="compare the projection with marketplace/ and commands/")
     publish_parser = commands.add_parser("publish", help="write the projection to a new directory")
     publish_parser.add_argument("--out", type=Path, required=True)
+    publish_parser.add_argument(
+        "--provider",
+        choices=PROVIDERS,
+        help="write that provider branch tree instead of marketplace/ and commands/",
+    )
     args = parser.parse_args(argv)
     repo: Path = args.repo
     pkl: str = args.pkl
     try:
-        tree = project(repo, pkl)
+        projected = project(repo, pkl)
+        tree = projected.repository
         if args.command == "publish":
             out: Path = args.out
-            publish(tree, out)
+            provider: str | None = args.provider
+            publish(tree if provider is None else projected.providers[provider], out)
             print(f"PROJECTED {out}")
             return 0
         report = drift(tree, committed_tree(repo))

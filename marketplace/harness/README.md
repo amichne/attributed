@@ -8,11 +8,21 @@ stop if it is missing.
 
 ## Agents with a package
 
-Factory and Claude Code can load [`../git-attributed`](../git-attributed), one
+Factory and Claude Code load [`../git-attributed`](../git-attributed), one
 plugin directory with a manifest per agent and shared `commands/` and
-`skills/`. Gemini CLI can load `commands/git-attributed-setup.toml` as an
-extension. The repository does not publish the marketplace listings or the
-Gemini extension manifest those installs need yet.
+`skills/`. Gemini CLI loads `commands/git-attributed-setup.toml` as an
+extension. Each push to `main` publishes a small tree per agent to a
+`harness/<agent>` branch:
+
+| Agent | Install | Then run |
+| --- | --- | --- |
+| Claude Code | `claude plugin marketplace add 'https://github.com/amichne/attributed.git#harness/claude'` then `claude plugin install git-attributed@attributed` | `/git-attributed-setup` |
+| Factory | Add `https://github.com/amichne/attributed` at branch `harness/factory` as a plugin marketplace, then install `git-attributed` | `/git-attributed-setup` |
+| Gemini CLI | `gemini extensions install https://github.com/amichne/attributed --ref harness/gemini` | `/git-attributed-setup` |
+
+The repository is private, so each install needs Git credentials for it.
+Claude Code's validator accepts the `harness/claude` tree. The Factory and
+Gemini install forms have not been run against their branches yet.
 
 ## Agents you set up by copying
 

@@ -1,0 +1,66 @@
+name: Publish marketplaces
+
+# Projects each provider tree from main and publishes it to its
+# harness/<provider> branch. Adapted from amichne/slopsentral
+# .github/workflows/publish-harnesses.yml.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-marketplaces-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish harness/${{ matrix.provider }}
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - claude
+          - factory
+          - gemini
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/toolchain
+
+      - name: Committed integrations match their source
+        run: uv run --locked --script tools/projection/project.py check
+
+      - name: Project harness/${{ matrix.provider }}
+        id: projection
+        env:
+          PROVIDER: ${{ matrix.provider }}
+        run: |
+          projection_path="$RUNNER_TEMP/projected-$PROVIDER"
+          uv run --locked --script tools/projection/project.py publish --provider "$PROVIDER" --out "$projection_path"
+          echo "projection-path=$projection_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish harness/${{ matrix.provider }}
+        env:
+          PROJECTION_PATH: ${{ steps.projection.outputs.projection-path }}
+          TARGET_BRANCH: harness/${{ matrix.provider }}
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!gh auth git-credential'
+        run: |
+          uv run --locked --script tools/publish/publish.py \
+            "$PROJECTION_PATH" "$TARGET_BRANCH" main "$GITHUB_SHA"
