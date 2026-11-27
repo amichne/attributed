@@ -28,7 +28,6 @@ func TestGitHookBlocksSkipQuietlyWithoutTheBinary(t *testing.T) {
 		"reference-transaction": referenceTransactionHookCommand(missing),
 	}
 	root := hookRepo(t)
-	hookGit(t, root, "commit", "--allow-empty", "-m", "base")
 	for name, command := range blocks {
 		script := "#!/bin/sh\n" + blockStart + "\n" + guardedGitHookCommand(missing, command) + "\n" +
 			blockEnd + "\necho user-code-ran\n"
