@@ -65,10 +65,10 @@ grep -q "attributed" .git/hooks/post-commit || fail "managed post-commit missing
 
 step "AI and human attribution through the commit hook"
 printf 'ai alpha\nai beta\n' >app.txt
-printf '%s' '{"session_id":"smoke-ai","tool_name":"Write","tool_input":{"file_path":"app.txt"},"model":"smoke-model"}' \
+printf '%s' '{"transcript_path":"","session_id":"smoke-ai","tool_name":"Write","tool_input":{"file_path":"app.txt"},"model":"smoke-model"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "ai checkpoint"
 printf 'seed line\n' >seed.txt
-printf '%s' '{"session_id":"smoke-human","tool_name":"Edit","tool_input":{"file_path":"seed.txt"}}' \
+printf '%s' '{"transcript_path":"","session_id":"smoke-human","tool_name":"Edit","tool_input":{"file_path":"seed.txt"}}' \
   | "$BIN" checkpoint droid --type human --hook-input stdin >/dev/null || fail "human checkpoint"
 git add -A
 git commit -qm "feat: ai and human" || fail "first commit"
@@ -80,10 +80,10 @@ require "human blame" "$BLAME" "human:smoke.test"
 
 step "partial commit keeps excluded provenance"
 printf 'p1\n' >p1.txt
-printf '%s' '{"session_id":"p1","tool_name":"Write","tool_input":{"file_path":"p1.txt"},"model":"m"}' \
+printf '%s' '{"transcript_path":"","session_id":"p1","tool_name":"Write","tool_input":{"file_path":"p1.txt"},"model":"m"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "p1 checkpoint"
 printf 'p2\n' >p2.txt
-printf '%s' '{"session_id":"p2","tool_name":"Write","tool_input":{"file_path":"p2.txt"},"model":"m"}' \
+printf '%s' '{"transcript_path":"","session_id":"p2","tool_name":"Write","tool_input":{"file_path":"p2.txt"},"model":"m"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "p2 checkpoint"
 git add p1.txt
 git commit -qm "feat: only p1" || fail "partial commit"
@@ -95,7 +95,7 @@ require "partial commit provenance" "$BLAME" "ai:claude/m"
 step "rebase keeps attribution and the next commit annotates"
 git checkout -q -b feat || fail "branch feat"
 printf 'f1 line\n' >f1.txt
-printf '%s' '{"session_id":"f1","tool_name":"Write","tool_input":{"file_path":"f1.txt"},"model":"m"}' \
+printf '%s' '{"transcript_path":"","session_id":"f1","tool_name":"Write","tool_input":{"file_path":"f1.txt"},"model":"m"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "f1 checkpoint"
 git add -A
 git commit -qm "feat: f1" || fail "f1 commit"
@@ -108,7 +108,7 @@ git rebase -q main || fail "rebase"
 BLAME="$("$BIN" blame f1.txt)"
 require "rebase attribution" "$BLAME" "ai:claude/m"
 printf 'f2 line\n' >f2.txt
-printf '%s' '{"session_id":"f2","tool_name":"Write","tool_input":{"file_path":"f2.txt"},"model":"m"}' \
+printf '%s' '{"transcript_path":"","session_id":"f2","tool_name":"Write","tool_input":{"file_path":"f2.txt"},"model":"m"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "f2 checkpoint"
 git add -A
 git commit -qm "feat: f2 after rebase" || fail "commit after rebase"
@@ -159,7 +159,7 @@ for WT in "$REPO/.worktrees/wt" "$WORK/wt-sibling"; do
   if command -v cygpath >/dev/null 2>&1; then
     WT_FILE="$(cygpath -m "$WT_FILE")"
   fi
-  PAYLOAD="$(printf '{"session_id":"wt","model":"wt-model","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$WT_FILE")"
+  PAYLOAD="$(printf '{"transcript_path":"","session_id":"wt","model":"wt-model","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$WT_FILE")"
   printf 'wt base\n' >"$WT/wt.txt"
   WARN="$(printf '%s' "$PAYLOAD" | "$BIN" checkpoint portable-factory --type human --hook-input stdin 2>&1 >/dev/null)" ||
     fail "worktree human checkpoint"
@@ -216,7 +216,7 @@ SIDE="$(git -C "$OTHER" rev-parse HEAD)"
 git -C "$OTHER" notes --ref=attributed add -m "other clone note" "$SIDE" || fail "other note"
 git -C "$OTHER" push -q origin side refs/notes/attributed || fail "other push"
 printf 'merge line\n' >merge.txt
-printf '%s' '{"session_id":"m1","tool_name":"Write","tool_input":{"file_path":"merge.txt"},"model":"m"}' \
+printf '%s' '{"transcript_path":"","session_id":"m1","tool_name":"Write","tool_input":{"file_path":"merge.txt"},"model":"m"}' \
   | "$BIN" checkpoint claude --type ai --hook-input stdin >/dev/null || fail "merge checkpoint"
 git add merge.txt
 git commit -qm "feat: after other clone" || fail "commit after other clone"

@@ -7,11 +7,9 @@
     "marketplace/git-attributed/README.md": "b86999f667fd14d353e271b98c7687873a9f490bf7419e7a04f7bcdc6aac9c70",
     "marketplace/git-attributed/commands/git-attributed-setup.md": "67ce14e0f0527ca333e31f80d497d872f95b5f43448f14e44acbb8a661a1b3ce",
     "marketplace/git-attributed/skills/git-attributed/SKILL.md": "3c4a32e4101bd9ea7b596d4416473c1ba25966e3859120b566e46aa7622f6ba8",
-    "marketplace/harness/README.md": "56d0d465140fba1e69f8ebb53406629a914ed15a991d0591b250942411d3affa",
-    "marketplace/harness/codex/git-attributed-setup.md": "bd6772c652d3d6bea8b7f7cd3ed424a9973c1959e0640bb21319a7023b469991",
-    "marketplace/harness/codex/hooks.json": "8a91e1f96f9268ec7834554aa3052cc76f64c596eb0a3f9fcf6c95d5b5303052",
-    "marketplace/harness/copilot/git-attributed-setup.prompt.md": "6de7764cd442f6618d9d3546a2d3aeffdf3bceda954f91c81927c3f863eeb760",
-    "marketplace/harness/copilot/hooks.json": "428907b47f1ae9bea92df7a70d078007e18b9ccd5cc16179562ff02aa6386dc5",
+    "marketplace/harness/README.md": "8c3c27edb1781eca7cd6c482d505aba3641d1ccd9f6829a659e37548befd60ec",
+    "marketplace/harness/codex/git-attributed-setup.md": "1e215a8ff3f468e3aff69efc1b9b31bab0331d84042e06791d82b2037602243f",
+    "marketplace/harness/copilot/git-attributed-setup.prompt.md": "fac1653ac857f6243c38519eaeb6b974b5a841256313e87cf13bef17f4ff4b6d",
     "marketplace/harness/cursor/git-attributed-setup.md": "37d4dede0ca38075debe3605ff34c9639987e7a6860c689cdfd507cfc0e6d63c",
     "marketplace/harness/cursor/hooks.json": "7496f22d1b5557d5977c7082d9b72414f251e3c6d2f050dacc772f06229d0d57",
     "marketplace/harness/gemini/settings.json": "f8951c6deb625ac7620dab4d0a934591b60c1c5424ada4c42f321d88599b482f",
@@ -25,6 +23,6 @@
     "marketplace/harness/windsurf/hooks.json": "dc91a753c371f0c38abf5e6b937976780122a13b84a59b6cca071b0c40ece967"
   },
   "pkl": "0.33.0",
-  "sourceSha": "c3e837f2573ae6d34a276f3fce1d2d7ea47d22f7fb98a4167390c74762fdb049",
+  "sourceSha": "42f161387e45ef3dbcf44f4ea8a9cb7b720e1b0959518706e3bd0594629366df",
   "version": 1
 }

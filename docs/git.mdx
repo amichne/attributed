@@ -32,7 +32,9 @@ A note contains repository paths, line ranges, agent and model names, human iden
 | `reference-transaction` | Follows ref moves outside commits, such as `git reset` and `git stash` |
 | `pre-push` | Merges and pushes `refs/notes/attributed`. `--local-notes` skips it |
 
-Agent hooks go in the agent's own config, `.claude/settings.json` for Claude Code or `.factory/hooks.json` for Factory. Pass `--user` to write your user-level config instead of the project's.
+Agent hooks go in each agent's own hook file: `.claude/settings.json`, `.factory/hooks.json`, `.codex/hooks.json`, `.github/hooks/git-attributed.json`, or `.devin/hooks.v1.json`. Attributed adds its entries beside any hooks already there and removes only those entries. It owns `.github/hooks/git-attributed.json` alone, so uninstall deletes that file. Pass `--user` to write your user-level config instead of the project's.
+
+Commit these files to share the hooks with your team. The Copilot file also runs in the Copilot coding agent, which reads `.github/hooks/` from the cloned repository.
 
 ## Use plain Git
 

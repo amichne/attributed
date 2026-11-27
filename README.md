@@ -39,7 +39,7 @@ Work with Claude Code as usual and commit. Then:
 git attributed blame path/to/file
 ```
 
-Use `--agent droid` for Factory. For other agents, see [`marketplace/harness`](marketplace/harness/README.md). Add `--local-notes` to keep notes out of your pushes.
+`--agent` also takes `droid` (Factory), `codex`, `copilot`, `devin`, a comma-separated list such as `claude,copilot`, or `all`. For other agents, see [`marketplace/harness`](marketplace/harness/README.md). Add `--local-notes` to keep notes out of your pushes.
 
 ## What you can rely on
 

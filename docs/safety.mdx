@@ -12,6 +12,8 @@ keywords: ["safety", "guarantees", "limits", "missing binary"]
 | Commits always land | Annotation runs after Git records the commit. If it fails, the commit stays and a message explains why. |
 | Conflicting notes are preserved | Import skips a commit with a different existing note. A push stops when the notes cannot be reconciled. |
 | Your hooks keep running | Attributed edits only its own marked block in each hook file and backs up the previous file. Uninstall removes just that block. |
+| Attribution never blocks an agent | Agent hooks report failures without stopping the tool. Copilot denies a tool call when a pre-tool hook fails, so Copilot checkpoints print the error and exit 0. |
+| Each agent records its own edits | Copilot and Devin also run `.claude/settings.json` hooks. The Claude Code hook skips their input, so their edits are never attributed to Claude Code. |
 | Readable without Attributed | Notes are plain Git notes. `git notes --ref=attributed show <commit>` works after uninstalling. |
 | No network of its own | The only network traffic is the pre-push hook fetching and pushing `refs/notes/attributed` to the remote you are already pushing to. `--local-notes` turns that off. |
 | No prompts or transcripts | Notes hold line ranges and metadata, never conversation content. |
@@ -38,4 +40,5 @@ Git hooks call the binary by its absolute path. If you move or reinstall it some
 - **Unobserved lines count as the commit author.** A line changed with no agent checkpoint is labeled human. Telling missing evidence apart from observed human edits is an open proposal.
 - **Concurrent shell edits can be ambiguous.** When two sessions run shell commands on the same file and the agent supplies no event ID, a checkpoint can't always be tied to one session.
 - **Attribution is self-reported.** Notes record what local hooks observed. Signing is tracked in [issue #8](https://github.com/amichne/attributed/issues/8).
-- **Platform and install paths.** Attributed supports Linux and macOS, and there is no release yet. The Factory and Gemini CLI marketplace installs have not been run against their published branches.
+- **Some agents report less.** Copilot sends no model name, so its lines read `ai:copilot/unknown`. Devin's hooks follow its documentation and have not been run against a real session.
+- **Platform and install paths.** Attributed supports Linux and macOS. The Factory and Gemini CLI marketplace installs have not been run against their published branches.
