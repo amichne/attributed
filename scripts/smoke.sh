@@ -175,29 +175,17 @@ for WT in "$REPO/.worktrees/wt" "$WORK/wt-sibling"; do
   require "linked worktree blame" "$BLAME" "ai:factory/wt-model"
 done
 
-step "reports and policy"
-"$BIN" stats >/dev/null || fail "stats"
-"$BIN" stats --json | grep -q '"lines"' || fail "stats json"
+step "verification, interop exports, and removed commands"
 "$BIN" verify --deep >/dev/null || fail "verify deep"
-"$BIN" check --max-untracked-percent 100 >/dev/null || fail "check pass"
-if "$BIN" check --max-ai-percent 0 >/dev/null 2>&1; then
-  fail "check must exit 1 when the policy is violated"
-fi
-"$BIN" disclosure >/dev/null || fail "disclosure json"
-"$BIN" disclosure --format spdx | grep -q '"spdxId"' || fail "disclosure spdx"
-"$BIN" disclosure --format cyclonedx | grep -q '"components"' || fail "disclosure cyclonedx"
 "$BIN" export --format gitai | grep -q '"schema_version":"authorship/3.0.0"' || fail "export gitai"
 "$BIN" export --format agent-trace | grep -q '"vcs"' || fail "export agent-trace"
-
-step "dashboard is self-contained and refuses replacement"
-"$BIN" dashboard --output "$WORK/report.html" >/dev/null || fail "dashboard"
-grep -q "Content-Security-Policy" "$WORK/report.html" || fail "dashboard CSP missing"
-if grep -Eq 'https?://' "$WORK/report.html"; then
-  fail "dashboard references an external URL"
-fi
-if "$BIN" dashboard --output "$WORK/report.html" >/dev/null 2>&1; then
-  fail "dashboard replaced an existing output"
-fi
+for removed in dashboard stats check disclosure ci update; do
+  set +e
+  "$BIN" "$removed" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -eq 2 ]] || fail "removed command $removed exited $status, want 2"
+done
 
 step "notes follow an ordinary push"
 git init -q --bare "$WORK/remote.git" || fail "bare remote"

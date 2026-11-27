@@ -92,7 +92,7 @@ func TestVerifyRepositoryDefensiveFailures(t *testing.T) {
 	}
 }
 
-func TestVerifyAndCheckRejectLongRanges(t *testing.T) {
+func TestVerifyRejectsLongRanges(t *testing.T) {
 	t.Parallel()
 	root := appRepo(t)
 	createLongHistory(t, root, verifyMaxCommits+1)
@@ -103,10 +103,6 @@ func TestVerifyAndCheckRejectLongRanges(t *testing.T) {
 	if _, err := verifyRepository(repo, "", "long", false); err == nil ||
 		!strings.Contains(err.Error(), "verification range exceeds") {
 		t.Fatalf("verify long history = %v", err)
-	}
-	if _, err := missingNoteViolations(repo, "", "long"); err == nil ||
-		!strings.Contains(err.Error(), "policy range exceeds") {
-		t.Fatalf("check long history = %v", err)
 	}
 }
 

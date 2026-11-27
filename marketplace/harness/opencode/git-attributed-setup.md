@@ -1,44 +1,38 @@
 # git-attributed setup
 
-Install git-attributed for the current operating system and activate
-attribution hooks. Never use `sudo`.
+Activate git-attributed attribution hooks for the current project. Never use
+`sudo`.
 
 On Windows, run OpenCode inside WSL and follow the Linux or macOS commands in
 the WSL shell. The plugin is declared Unix-only, and native Windows plugin
-loading has not been verified. `install.ps1` does
-not detect OpenCode or install its plugin. If the user runs OpenCode natively
-on Windows, use the PowerShell commands below and tell the user that this
-setup is unverified.
+loading has not been verified. If the user runs OpenCode natively on Windows,
+use the PowerShell commands below and tell the user that this setup is
+unverified.
 
-**1. Install the verified binary.**
+**1. Find the binary.**
+
+Attributed has no release yet, so this command does not download a binary.
+Find `git-attributed` on `PATH`.
 
 Linux, macOS, or WSL:
 
 ```sh
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/amichne/attributed/main/install.sh |
-  bash -s -- --no-git-hook
-binary="$HOME/.local/bin/git-attributed"
+binary="$(command -v git-attributed)" || { echo "git-attributed is not on PATH" >&2; exit 1; }
 ```
 
 Native Windows PowerShell:
 
 ```powershell
-$installer = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ps1")
-try {
-    irm https://raw.githubusercontent.com/amichne/attributed/main/install.ps1 -OutFile $installer
-    & $installer -NoGitHook
-}
-finally {
-    Remove-Item $installer -Force -ErrorAction SilentlyContinue
-}
-$binary = Join-Path $HOME "bin/git-attributed.exe"
+$binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-The installer verifies the release archive checksum and the binary version.
-Run the remaining commands through the absolute `$binary` path, so setup does
-not depend on this process reloading `PATH`. PowerShell needs the call
-operator for that, as in `& $binary version`. Verify `$binary version`.
+If it is missing, stop. Tell the user to build it from an Attributed checkout
+with Go 1.24 or later, as in
+`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
+and then rerun this command. Run the remaining commands through the absolute
+`$binary` path, so setup does not depend on this process reloading `PATH`.
+PowerShell needs the call operator for that, as in `& $binary version`.
+Verify `$binary version`.
 
 **2. Install the Git hooks.**
 

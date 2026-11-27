@@ -7,15 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"github.com/amichne/attributed/internal/ci"
-	"github.com/amichne/attributed/internal/dashboard"
 	"github.com/amichne/attributed/internal/gitcmd"
 	"github.com/amichne/attributed/internal/hooks"
 	"github.com/amichne/attributed/internal/model"
@@ -164,113 +161,6 @@ func readCheckpointInput(input io.Reader) ([]byte, error) {
 	}
 }
 
-func runDashboard(env *Env, command *command, args []string) (int, error) {
-	flags := flag.NewFlagSet(command.name, flag.ContinueOnError)
-	var output strings.Builder
-	flags.SetOutput(&output)
-	rangeValue := ""
-	rangeSpecified := false
-	flags.Func("range", "revision range", func(value string) error {
-		if rangeSpecified {
-			return errors.New("--range specified more than once")
-		}
-		rangeValue = value
-		rangeSpecified = true
-		return nil
-	})
-	repoMode := flags.Bool("repo", false, "render repository range report")
-	outputPath := flags.String("output", "", "output file")
-	if err := flags.Parse(args); err != nil {
-		return flagError(env, command, output.String(), err)
-	}
-	rangeModeArg := false
-	for _, arg := range args {
-		if arg == "--repo" || arg == "--range" || strings.HasPrefix(arg, "--range=") {
-			rangeModeArg = true
-			break
-		}
-	}
-	if flags.NArg() > 1 {
-		if rangeModeArg {
-			return commandUsageError(env, command, errors.New("--range or --repo cannot be combined with a file argument"))
-		}
-		return commandUsageError(env, command, errors.New("dashboard accepts at most one file"))
-	}
-	if rangeSpecified || *repoMode {
-		if flags.NArg() != 0 {
-			return commandUsageError(env, command, errors.New("--range or --repo cannot be combined with a file argument"))
-		}
-		aggregate, code, err := collectRangeAggregate(env, command, rangeSpecified, rangeValue)
-		if err != nil {
-			return code, err
-		}
-		data, err := dashboard.RenderRange(aggregate)
-		if err != nil {
-			return operationalError(env, command.name, err)
-		}
-		file, path, err := createDashboardOutput(env, *outputPath)
-		if err != nil {
-			return operationalError(env, command.name, err)
-		}
-		if err := writeExclusiveOutput(file, path, data, "dashboard"); err != nil {
-			return operationalError(env, command.name, err)
-		}
-		fmt.Fprintln(env.Stdout, path)
-		return ExitSuccess, nil
-	}
-	repo, err := discoverForEnv(env)
-	if err != nil {
-		return operationalError(env, command.name, err)
-	}
-	status, err := provenance.Status(repo)
-	if err != nil {
-		return operationalError(env, command.name, err)
-	}
-	report := dashboard.Report{Status: status}
-	if flags.NArg() == 1 {
-		file, err := provenance.BlameHeadFile(repo, flags.Arg(0))
-		if err != nil {
-			return operationalError(env, command.name, err)
-		}
-		report.Commit = file.Commit
-		report.Files = []provenance.BlameResult{file}
-		report.Sessions = file.Sessions
-	} else {
-		collection, err := provenance.BlameHead(repo)
-		if err != nil {
-			return operationalError(env, command.name, err)
-		}
-		report.Commit = collection.Commit
-		report.Files = collection.Files
-		report.Sessions = collection.Sessions
-		writeWarnings(env, collection.Warnings)
-	}
-	data, err := dashboard.Render(report)
-	if err != nil {
-		return operationalError(env, command.name, err)
-	}
-	file, path, err := createDashboardOutput(env, *outputPath)
-	if err != nil {
-		return operationalError(env, command.name, err)
-	}
-	if err := writeExclusiveOutput(file, path, data, "dashboard"); err != nil {
-		return operationalError(env, command.name, err)
-	}
-	fmt.Fprintln(env.Stdout, path)
-	return ExitSuccess, nil
-}
-
-func createDashboardOutput(env *Env, requested string) (*os.File, string, error) {
-	if requested == "" {
-		file, err := os.CreateTemp("", "git-attributed-dashboard-*.html")
-		if err != nil {
-			return nil, "", fmt.Errorf("create dashboard temp file: %w", err)
-		}
-		return file, file.Name(), nil
-	}
-	return createExclusiveOutput(env, requested, "dashboard")
-}
-
 func runAnnotate(env *Env, command *command, args []string) (int, error) {
 	flags := flag.NewFlagSet(command.name, flag.ContinueOnError)
 	var output strings.Builder
@@ -334,7 +224,7 @@ func annotateOperationalError(
 }
 
 func runBlame(env *Env, command *command, args []string) (int, error) {
-	jsonOutput, showTokens, mode, rest, err := parseBlameFlags(args)
+	jsonOutput, mode, rest, err := parseBlameFlags(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(env.Stdout, command.usage)
@@ -360,29 +250,28 @@ func runBlame(env *Env, command *command, args []string) (int, error) {
 		return ExitSuccess, nil
 	}
 	writeWarnings(env, result.Warnings)
-	writeBlameText(env.Stdout, result.Lines, result.Sessions, useColor(mode, env.Stdout), showTokens)
+	writeBlameText(env.Stdout, result.Lines, useColor(mode, env.Stdout))
 	return ExitSuccess, nil
 }
 
 // parseBlameFlags accepts the blame flags without a flag set, so the file
 // argument can follow or precede them.
-func parseBlameFlags(args []string) (bool, bool, colorMode, []string, error) {
+func parseBlameFlags(args []string) (bool, colorMode, []string, error) {
 	options := blameOptions{mode: colorAuto}
 	for _, arg := range args {
 		handled, err := options.parse(arg)
 		if err != nil {
-			return false, false, options.mode, nil, err
+			return false, options.mode, nil, err
 		}
 		if !handled {
 			options.rest = append(options.rest, arg)
 		}
 	}
-	return options.jsonOutput, options.showTokens, options.mode, options.rest, nil
+	return options.jsonOutput, options.mode, options.rest, nil
 }
 
 type blameOptions struct {
 	jsonOutput bool
-	showTokens bool
 	mode       colorMode
 	colorSet   bool
 	rest       []string
@@ -392,8 +281,6 @@ func (options *blameOptions) parse(arg string) (bool, error) {
 	switch {
 	case arg == jsonFlag:
 		return true, setBlameFlag(jsonFlag, &options.jsonOutput)
-	case arg == "--tokens":
-		return true, setBlameFlag("--tokens", &options.showTokens)
 	case arg == "-h" || arg == "--help":
 		return true, flag.ErrHelp
 	case strings.HasPrefix(arg, "--color="):
@@ -425,21 +312,11 @@ func setBlameFlag(name string, value *bool) error {
 // writeBlameText prints one aligned row per line. The label column is sized
 // from the widest label so a long human-override label cannot push the line
 // numbers out of alignment.
-func writeBlameText(
-	out io.Writer,
-	lines []provenance.BlameLine,
-	sessions map[string]model.NoteSession,
-	color bool,
-	showTokens bool,
-) {
+func writeBlameText(out io.Writer, lines []provenance.BlameLine, color bool) {
 	labels := make([]string, len(lines))
 	width := 0
 	for index, line := range lines {
-		label := line.Attribution.Label()
-		if showTokens {
-			label += tokenSuffix(sessions, line.Attribution)
-		}
-		labels[index] = label
+		labels[index] = line.Attribution.Label()
 		if count := utf8.RuneCountInString(labels[index]); count > width {
 			width = count
 		}
@@ -457,34 +334,6 @@ func writeBlameText(
 		}
 		fmt.Fprintf(out, "%s %s %s\n", label, number, line.Content)
 	}
-}
-
-// tokenSuffix renders the session token usage of one attribution as a
-// compact bracket, such as [120i/34o], with cache counts only when nonzero.
-// Lines without an attributed agent session carry no suffix, so the plain
-// text path and the color path stay identical in content.
-func tokenSuffix(sessions map[string]model.NoteSession, attribution model.Attribution) string {
-	if attribution.Agent == "" || attribution.Session == "" {
-		return ""
-	}
-	session, ok := sessions[model.NoteSessionKey(attribution.Agent, attribution.Session)]
-	if !ok {
-		return ""
-	}
-	if !session.HasTokenUsage() {
-		return ""
-	}
-	parts := []string{
-		strconv.FormatUint(session.TokensIn, 10) + "i",
-		strconv.FormatUint(session.TokensOut, 10) + "o",
-	}
-	if session.CacheRead > 0 {
-		parts = append(parts, strconv.FormatUint(session.CacheRead, 10)+"cr")
-	}
-	if session.CacheWrite > 0 {
-		parts = append(parts, strconv.FormatUint(session.CacheWrite, 10)+"cw")
-	}
-	return " [" + strings.Join(parts, "/") + "]"
 }
 
 func runStatus(env *Env, command *command, args []string) (int, error) {
@@ -529,8 +378,7 @@ func runStatus(env *Env, command *command, args []string) (int, error) {
 	return ExitSuccess, nil
 }
 
-// runInstallHooks merges managed agent and Git hooks and provisions the
-// forge attribution workflow for a public forge origin.
+// runInstallHooks merges managed agent and Git hooks.
 func runInstallHooks(env *Env, command *command, args []string) (int, error) {
 	options, err := parseHookOptions(command, args)
 	if err != nil {
@@ -560,38 +408,10 @@ func runInstallHooks(env *Env, command *command, args []string) (int, error) {
 	if options.Git && !options.LocalNotes {
 		fmt.Fprintln(env.Stdout, "attribution notes will be pushed automatically")
 	}
-	provisionForgeWorkflow(env, dir, options)
 	return ExitSuccess, nil
 }
 
-// provisionForgeWorkflow creates the forge attribution workflow when the
-// origin remote points at a supported public forge. Provisioning belongs
-// to Git-hook installation with shared notes and is skipped for --template
-// scope, which has no repository remote. Detection or installation
-// problems warn and leave the exit code unchanged.
-func provisionForgeWorkflow(env *Env, dir string, options hooks.Options) {
-	if !options.Git || options.LocalNotes || options.Template {
-		return
-	}
-	provider, found := ci.DetectProvider(dir)
-	if !found {
-		fmt.Fprintln(env.Stdout, "no GitHub or GitLab remote detected; run: git-attributed ci install --provider github|gitlab")
-		return
-	}
-	result, err := ci.Install(dir, provider)
-	if err != nil {
-		fmt.Fprintf(env.Stderr, "warning: could not install the forge workflow: %v\n", err)
-		return
-	}
-	if result.Changed {
-		fmt.Fprintf(env.Stdout, "created %s\n", result.Path)
-		return
-	}
-	fmt.Fprintf(env.Stdout, "workflow already installed at %s\n", result.Path)
-}
-
-// runUninstall removes managed hooks and the template-matching forge
-// attribution workflow.
+// runUninstall removes managed hooks.
 func runUninstall(env *Env, command *command, args []string) (int, error) {
 	options, err := parseHookOptions(command, args)
 	if err != nil {
@@ -608,13 +428,6 @@ func runUninstall(env *Env, command *command, args []string) (int, error) {
 	result, err := hooks.Uninstall(dir, options)
 	if err != nil {
 		return operationalError(env, command.name, err)
-	}
-	if options.Git && !options.Template {
-		removed, removeErr := ci.Uninstall(dir)
-		result.Changed = append(result.Changed, removed...)
-		if removeErr != nil {
-			fmt.Fprintf(env.Stderr, "warning: could not remove the forge workflow: %v\n", removeErr)
-		}
 	}
 	for _, path := range result.Changed {
 		fmt.Fprintf(env.Stdout, "updated %s\n", path)
@@ -733,4 +546,13 @@ func valueOrNone(value string) string {
 		return "(none)"
 	}
 	return value
+}
+
+// shortCommit abbreviates an object ID for text output.
+func shortCommit(value string) string {
+	const shortLength = 12
+	if len(value) <= shortLength {
+		return value
+	}
+	return value[:shortLength]
 }
