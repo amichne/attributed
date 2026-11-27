@@ -1,0 +1,68 @@
+---
+title: "Qualify the attribution core"
+sidebarTitle: "Qualification plan"
+description: "Trace the upstream dependencies and decide what evidence is required before shipping a smaller Go distribution."
+keywords: ["Git notes", "line attribution", "history rewrites"]
+---
+
+The first extraction should preserve how git-byline captures an edit, reconciles it against staged content, and records the result. Run the [upstream baseline](/baseline) before making changes. Keep a regression test even when it describes a behavior that a later proposal will change.
+
+## Trace the evidence
+
+A **checkpoint** records an edit observation in its worktree and refers to snapshot blobs in Git. A **note** holds reconciled line ranges for a commit. Linked worktrees share commit notes. Each worktree needs its own pending checkpoints, replay state, and retention ref. [Upstream architecture](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/docs/ARCHITECTURE.md).
+
+| Boundary | Upstream callers and storage to qualify |
+| --- | --- |
+| Capture | Factory Droid, Claude Code, Copilot, VS Code, Cursor, Codex, Gemini CLI, Windsurf, Grok, OpenCode, and the generic `agent-v1` input feed the checkpoint command. Verify payload parsing and path ownership for each supported adapter. |
+| Reconciliation | The post-commit hook invokes annotation. Replay checkpoints against the commit, carry any unstaged remainder forward, and inspect the resulting ranges with blame. |
+| Worktree state | Preserve `byline/checkpoints.jsonl`, `byline/state.json` (versions 1 through 3), and snapshot reachability through `refs/worktree/byline/checkpoints`. Exercise recovery with parked checkpoints and interrupted writes. |
+| History and sync | Preserve the six Git hook entry points: post-commit, pre-push, post-rewrite, post-merge, post-checkout, and reference-transaction. Trace amend, rebase, stash, and remote note reconciliation through their existing handlers. |
+| Wire formats | Keep canonical `refs/notes/byline` records (versions 1 through 4), `refs/notes/byline-stash`, and the worktree-local remote-notes ref distinct. Check Git AI v3 import/export and Agent Trace 0.1 export against their own fixtures. |
+
+The harness matrix documents known capture limitations. Git AI export may omit an AI range when the exporting clone lacks a matching local checkpoint. Compare canonical note fidelity and exported ranges separately. [Harness compatibility](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/docs/COMPATIBILITY.md) · [Interoperability](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/docs/INTEROP.md).
+
+## Candidate dependency graph
+
+The pinned CLI links 20 project packages and uses only the Go standard library outside its own module. These are the proposed roots and direct internal imports to qualify during extraction. The smallest buildable subset still needs a compiled downstream command and passing behavioral tests.
+
+| Owner | Direct dependencies in the candidate core |
+| --- | --- |
+| `cmd/git-byline` | CLI dispatch in `app` |
+| `app` (candidate after trimming dispatch) | `engine`, `gitcmd`, `hooks`, `interop`, `model`, `notes`, `preset`, `provenance`, `rewrite`, `transcript`, `version` |
+| `provenance` | `engine`, `gitcmd`, `lock`, `model`, `notes`, `preset`, `rewrite`, `store`, `transcript` |
+| `hooks` | `gitcmd`, `lock` |
+| `interop` | `engine`, `gitcmd`, `model`, `notes`, `store` |
+| `rewrite` | `engine`, `model` |
+| `notes` | `gitcmd`, `model` |
+| `engine`, `gitcmd`, `preset`, `store` | `model` |
+| `lock`, `model`, `transcript`, `version` | No internal imports |
+
+The other five packages reachable from the current CLI are `ci`, `dashboard`, `disclosure`, `report`, and `runner`. The proposed closure has 15 project packages including the command. Use `go list -deps ./cmd/git-byline` to check reachability again after removing callers.
+
+Remove dashboard rendering, productivity reports, compliance disclosure, token accounting, and self-update in the extraction. Inspect the callers as well as the packages. Installation can provision forge CI. Model resolution shares transcript handling with usage collection, and older notes can carry token fields. Keep old records readable while testing removal of the producers. **Capabilities removed in this commit: none.** [CLI](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal/app) · [Package sources](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal).
+
+## Acceptance checks for the extracted binary
+
+| Scenario | Evidence required |
+| --- | --- |
+| Retained behavior | Run retained upstream tests with fresh results. Account for each excluded test by the capability removed. |
+| Independent clones | Capture in two clones, exchange branch and note refs with a local bare remote, then compare the decoded per-commit ranges in a fresh clone. Conflicting notes must surface a diagnostic and preserve both inputs. |
+| Partial staging and rewrites | Stage one of two agent-edited hunks. Check the committed ranges and the pending hunk. Amend, rebase, split, and drop commits. Verify surviving ranges against expected lines and inspect ambiguous mappings. |
+| Session and worktree isolation | Interleave two sessions on one file and repeat across linked worktrees. Check checkpoint ownership and note ranges. Exercise missing event IDs and overlapping shell edits. |
+| Interrupted writes | Interrupt capture and annotation at persistence boundaries. Restart and account for each checkpoint, its referenced blob, and each written note. Repeat recovery to check idempotence. |
+| Hook coexistence | Install twice with unrelated hooks present. Exercise both handlers. Remove the producer, then verify unrelated hook content, permissions, and behavior. |
+| Stock Git readability | Save a commit ID and expected ranges, uninstall the producer, and read the same note using `git notes --ref=byline show <commit>`. Compare the persisted ranges. |
+
+Candidate witnesses include the partial-commit and worktree tests in `internal/provenance`, its rewrite and recovery tests, the store tail-repair tests, hook ownership tests, and the independent-clone smoke workflow. Run downstream acceptance checks before claiming these guarantees. [Behavioral tests](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal/provenance) · [Smoke workflow](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/scripts/smoke.sh).
+
+## Proposals after a green extraction
+
+| Decision | Evidence and required test |
+| --- | --- |
+| Unknown authorship | Ordinary upstream commits assign unexplained lines to the human commit identity. Specify how readers distinguish observed human edits, missing evidence, and conflicts. Test mixed commits and old notes. |
+| Model identity | Define which harness fields or session evidence establish a model. Exercise missing and contradictory identifiers and preserve uncertainty. |
+| Privacy | Specify an allowlist for published fields. Seed capture with recognizable prompt and transcript strings, then inspect serialized notes, exports, and objects reachable from the published notes ref. |
+| Commit trailers | Decide whether trailers add a useful commit-level summary. Test amend, rebase, duplicate trailers, and existing user trailers. Keep line-level evidence accessible. |
+| Remote publication | Upstream installs a publishing pre-push hook by default. Propose an explicit authorization boundary, selected refs and remote, conflict handling, and a local-only default. Test against disposable remotes. |
+
+Each proposal needs a demonstrated deficiency, compatibility analysis, and a separate implementation decision. Publication and merge require separate authorization. [Attribution fallback](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal/provenance/service.go#L600-L606) · [Installation behavior](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/docs/INSTALL.md).
