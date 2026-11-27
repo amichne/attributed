@@ -7,7 +7,7 @@
     "marketplace/git-attributed/README.md": "b81ab8ce87aa62ea215865c7d8ce69bc4adb894a54219e51f6976157ee15df7a",
     "marketplace/git-attributed/commands/git-attributed-setup.md": "3adc89e99281657347ea3857bddc538d40c4648049bb8afa763d953f7b6a9f6b",
     "marketplace/git-attributed/skills/git-attributed/SKILL.md": "7b0b2b91fb928ac51076e8c9696e9219be52294a805f8ad992da6e378f24f735",
-    "marketplace/harness/README.md": "0b727faa4cb4a660a2bccab0dbe92a84985080d6e256cbfd1101fa8d86f1ce41",
+    "marketplace/harness/README.md": "dfe34f4915330681ebd6131c33200997f8c6a7f17b59b2c469a67ebe7a3b4db6",
     "marketplace/harness/codex/git-attributed-setup.md": "47a3c33ed96075cdab59397ef938c5eea20a75918fdd913806c54c7685fce402",
     "marketplace/harness/codex/hooks.json": "8a91e1f96f9268ec7834554aa3052cc76f64c596eb0a3f9fcf6c95d5b5303052",
     "marketplace/harness/copilot/git-attributed-setup.prompt.md": "987d79d8f81b736a24fe03641fef02f4fc1bd63982df7c8fb1e3a5aff9b87fa7",
@@ -25,6 +25,6 @@
     "marketplace/harness/windsurf/hooks.json": "dc91a753c371f0c38abf5e6b937976780122a13b84a59b6cca071b0c40ece967"
   },
   "pkl": "0.33.0",
-  "sourceSha": "645fd572c54d0b041e3b52854f6e75b84d49c93f8ec6dea954b115d27fe9d729",
+  "sourceSha": "64d5794685e97884faa5306c71093c7275f5302294044b79a20a1472a2338fdd",
   "version": 1
 }

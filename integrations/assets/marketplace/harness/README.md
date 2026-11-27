@@ -20,7 +20,6 @@ extension. Each push to `main` publishes a small tree per agent to a
 | Factory | Add `https://github.com/amichne/attributed` at branch `harness/factory` as a plugin marketplace, then install `git-attributed` | `/git-attributed-setup` |
 | Gemini CLI | `gemini extensions install https://github.com/amichne/attributed --ref harness/gemini` | `/git-attributed-setup` |
 
-The repository is private, so each install needs Git credentials for it.
 Claude Code's validator accepts the `harness/claude` tree. The Factory and
 Gemini install forms have not been run against their branches yet.
 
