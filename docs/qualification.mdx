@@ -28,7 +28,7 @@ The pinned CLI links 20 project packages and uses only the Go standard library o
 | Owner | Direct dependencies in the candidate core |
 | --- | --- |
 | `cmd/git-attributed` | CLI dispatch in `app` |
-| `app` (candidate after trimming dispatch) | The root `attributed` package for license notices, then `engine`, `gitcmd`, `hooks`, `interop`, `model`, `notes`, `preset`, `provenance`, `rewrite`, `transcript`, `version` |
+| `app` | The root `attributed` package for license notices, then `engine`, `gitcmd`, `hooks`, `interop`, `model`, `notes`, `preset`, `provenance`, `rewrite`, `transcript`, `version` |
 | `provenance` | `engine`, `gitcmd`, `lock`, `model`, `notes`, `preset`, `rewrite`, `store`, `transcript` |
 | `hooks` | `gitcmd`, `lock` |
 | `interop` | `engine`, `gitcmd`, `model`, `notes`, `store` |
@@ -37,9 +37,9 @@ The pinned CLI links 20 project packages and uses only the Go standard library o
 | `engine`, `gitcmd`, `preset`, `store` | `model` |
 | `attributed`, `lock`, `model`, `transcript`, `version` | No internal imports |
 
-The other five packages reachable from the current CLI are `ci`, `dashboard`, `disclosure`, `report`, and `runner`. The proposed closure has 16 project packages including the command and the root license package. Use `go list -deps ./cmd/git-attributed` to check reachability again after removing callers.
+The pinned CLI also reached `ci`, `dashboard`, `disclosure`, `report`, and `runner`, and slice 4 removed them. The closure has 16 project packages, including the command and the root license package. Use `go list -deps ./cmd/git-attributed` to check reachability after each change.
 
-Remove dashboard rendering, productivity reports, compliance disclosure, token accounting, and self-update in the extraction. Inspect the callers as well as the packages. Installation can provision forge CI. Model resolution shares transcript handling with usage collection, and older notes can carry token fields. Keep old records readable while testing removal of the producers. **Capabilities removed so far: none.** The import drops repository files only, as listed in the [extraction slices](/extraction#paths-left-out). [CLI](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal/app) · [Package sources](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal).
+Remove dashboard rendering, productivity reports, compliance disclosure, token accounting, and self-update in the extraction. Inspect the callers as well as the packages. Installation can provision forge CI. Model resolution shares transcript handling with usage collection, and older notes can carry token fields. Keep old records readable while testing removal of the producers. **Capabilities removed:** dashboards, statistics, policy checks, disclosure, forge workflows, self-update, release checks, and token accounting. The [extraction slices](/extraction#remove-out-of-scope-producers) map each removal to its packages and tests. [CLI](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal/app) · [Package sources](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/internal).
 
 ## Acceptance checks for the extracted binary
 
