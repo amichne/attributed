@@ -12,11 +12,17 @@ import (
 )
 
 // DeniesOnHookError reports whether the agent behind a preset denies the tool
-// call when its pre-tool hook exits non-zero. GitHub Copilot does, so its
-// checkpoints report failures on stderr and still exit 0: attribution must
-// never block an edit.
+// call when its pre-tool hook exits non-zero. GitHub Copilot does, in Copilot
+// CLI and in VS Code, which now share its hooks, so these checkpoints report
+// failures on stderr and still exit 0: attribution must never block an edit.
+// portable-vscode is included because Copilot CLI also runs the legacy VS
+// Code hook file from .github/hooks/.
 func DeniesOnHookError(name string) bool {
-	return name == "copilot" || name == "portable-copilot"
+	switch name {
+	case "copilot", "portable-copilot", "portable-vscode":
+		return true
+	}
+	return false
 }
 
 // Agents lists the agents whose hooks install-hooks manages, in install order.

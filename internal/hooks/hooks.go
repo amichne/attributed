@@ -271,6 +271,17 @@ func changeSelectedAgentConfigs(
 		if didChange {
 			changed = append(changed, file.path)
 		}
+		// The Copilot hooks replace the legacy VS Code file, which made
+		// Copilot record every edit twice.
+		if agent == "copilot" && !options.User && root != "" {
+			migrated, err := migrateLegacyVSCodeHooks(root)
+			if err != nil {
+				return nil, err
+			}
+			if migrated {
+				changed = append(changed, legacyVSCodePath(root))
+			}
+		}
 	}
 	return changed, nil
 }

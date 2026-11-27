@@ -43,16 +43,24 @@ git attributed install-hooks --agent copilot --git    # .github/hooks/git-attrib
 git attributed install-hooks --agent devin --git      # .devin/hooks.v1.json
 ```
 
-Combine agents with commas, as in `--agent claude,copilot`. The Codex and
-Copilot setup commands below run the same command for you:
+Combine agents with commas, as in `--agent claude,copilot`. The setup commands
+below run the same command for you:
 
 | Agent | Setup command | Copy it to |
 | --- | --- | --- |
 | Codex | [`codex/git-attributed-setup.md`](codex/git-attributed-setup.md) | `~/.codex/prompts/` |
-| GitHub Copilot | [`copilot/git-attributed-setup.prompt.md`](copilot/git-attributed-setup.prompt.md) | `.github/prompts/` |
+| GitHub Copilot CLI | [`copilot/git-attributed-setup.prompt.md`](copilot/git-attributed-setup.prompt.md) | `.github/prompts/` |
+| VS Code agent | [`vscode/git-attributed-setup.prompt.md`](vscode/git-attributed-setup.prompt.md) | `.github/prompts/` |
 
-Codex runs project hooks only in a trusted project and after you approve them
-in `/hooks`. Copilot CLI loads repository hooks only from a trusted folder.
+VS Code's agent runs the same hooks as Copilot CLI, so both use `--agent
+copilot`. Codex runs project hooks only in a trusted project and after you
+approve them in `/hooks`. Copilot CLI and VS Code load repository hooks only
+from a trusted folder.
+
+Older setups copied `.github/hooks/git-attributed-vscode.json`. Copilot CLI
+runs that file too, and it blocked Copilot's edits. `install-hooks --agent
+copilot` removes git-attributed's entries from it, and `status` warns while
+it remains.
 
 ## Agents you set up by copying
 
@@ -62,7 +70,6 @@ file below. Copying the hook file by hand works too.
 
 | Agent | Setup command | Copy it to | Hook file | Copy it to |
 | --- | --- | --- | --- | --- |
-| VS Code Agent | [`vscode/git-attributed-setup.prompt.md`](vscode/git-attributed-setup.prompt.md) | `.github/prompts/` | [`vscode/hooks.json`](vscode/hooks.json) | `.github/hooks/git-attributed-vscode.json` |
 | Cursor | [`cursor/git-attributed-setup.md`](cursor/git-attributed-setup.md) | `.cursor/commands/` | [`cursor/hooks.json`](cursor/hooks.json) | `.cursor/hooks.json` |
 | Windsurf | [`windsurf/git-attributed-setup.md`](windsurf/git-attributed-setup.md) | `.windsurf/workflows/` | [`windsurf/hooks.json`](windsurf/hooks.json) | `.windsurf/hooks.json` |
 | Grok | [`grok/git-attributed-setup.md`](grok/git-attributed-setup.md) | the prompt directory your build reads | [`grok/hooks.json`](grok/hooks.json) | `.grok/hooks/git-attributed.json` |
@@ -84,8 +91,8 @@ Each hook file is projected from typed source in `integrations/`, and
 the projection. The hook bodies contain no absolute path and find
 `git-attributed` through `PATH`. Cursor hooks resolve the project root with
 `git rev-parse --show-toplevel`. Gemini CLI and Grok hooks read it from
-`GEMINI_PROJECT_DIR` and `GROK_WORKSPACE_ROOT`. VS Code and Windsurf hooks
-run in the directory the agent starts them in. The OpenCode
+`GEMINI_PROJECT_DIR` and `GROK_WORKSPACE_ROOT`. Windsurf hooks run in the
+directory the agent starts them in. The OpenCode
 plugin uses its plugin context to resolve the project root.
 
 Each hook calls `git-attributed checkpoint portable-<agent> --hook-input stdin`,

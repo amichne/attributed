@@ -366,6 +366,10 @@ func runStatus(env *Env, command *command, args []string) (int, error) {
 	if err != nil {
 		return operationalError(env, command.name, err)
 	}
+	if legacy, err := hooks.LegacyVSCodeHooks(repo.Root); err == nil && legacy != "" {
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"Copilot also runs the legacy hooks in %s, which can block its edits with older git-attributed releases; run git attributed install-hooks --agent copilot to remove them", legacy))
+	}
 	if jsonOutput {
 		if err := writeJSON(env, result); err != nil {
 			return operationalError(env, command.name, err)

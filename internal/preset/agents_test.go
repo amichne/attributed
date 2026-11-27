@@ -257,7 +257,7 @@ func TestClaudePresetSkipsOtherAgents(t *testing.T) {
 func TestDeniesOnHookError(t *testing.T) {
 	t.Parallel()
 	for name, want := range map[string]bool{
-		"copilot": true, "portable-copilot": true,
+		"copilot": true, "portable-copilot": true, "portable-vscode": true,
 		"claude": false, "droid": false, "codex": false, "devin": false,
 	} {
 		if got := DeniesOnHookError(name); got != want {
