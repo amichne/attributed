@@ -56,12 +56,12 @@ jobs:
     env:
       GOTOOLCHAIN: local
     steps:
-      - name: Require the tap token
+      - name: Require the tap deploy key
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "::error::Set HOMEBREW_TAP_TOKEN to a token with Contents write on amichne/homebrew-tap, then re-run this job."
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then
+            echo "::error::Set HOMEBREW_TAP_DEPLOY_KEY to the private half of a write deploy key on amichne/homebrew-tap, then re-run this job."
             exit 1
           fi
 
@@ -87,7 +87,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2

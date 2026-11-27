@@ -52,8 +52,11 @@ checksum:
 changelog:
   disable: true
 
+# release-please creates the release as a draft, because immutable releases
+# lock assets once published. GoReleaser uploads to that draft, then publishes it.
 release:
   mode: keep-existing
+  use_existing_draft: true
 
 homebrew_casks:
   - name: git-attributed
@@ -83,4 +86,7 @@ homebrew_casks:
       owner: amichne
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      # A deploy key with write access to the tap only.
+      git:
+        url: git@github.com:amichne/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
