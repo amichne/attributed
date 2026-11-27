@@ -5,12 +5,12 @@ description: "What Attributed guarantees, where it stops on purpose, its rough e
 keywords: ["safety", "guarantees", "limits", "missing binary"]
 ---
 
-## Guarantees
+## Hook and note behavior
 
-| Guarantee | What it means |
+| Behavior | What it means |
 | --- | --- |
 | Commits always land | Annotation runs after Git records the commit. If it fails, the commit stays and a message explains why. |
-| Notes are never overwritten | A write, import, or push that would replace a different note stops instead. |
+| Conflicting notes are preserved | Import skips a commit with a different existing note. A push stops when the notes cannot be reconciled. |
 | Your hooks keep running | Attributed edits only its own marked block in each hook file and backs up the previous file. Uninstall removes just that block. |
 | Readable without Attributed | Notes are plain Git notes. `git notes --ref=attributed show <commit>` works after uninstalling. |
 | No network of its own | The only network traffic is the pre-push hook fetching and pushing `refs/notes/attributed` to the remote you are already pushing to. `--local-notes` turns that off. |
