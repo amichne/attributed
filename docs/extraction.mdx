@@ -69,7 +69,7 @@ Attributed is MIT licensed. `LICENSE` holds the Attributed notice and `LICENSE.u
 | 1 | Import the pinned tree with the naming map | Done | Codemod output matches the import commit. All 22 packages and the 17-stage smoke suite pass. |
 | 2 | Embed the license notices | Done | `go test ./...` passed 23 packages, 994 top-level tests, and 1,569 subtests, including the built-binary license check. |
 | 3 | Project harness integrations | Done | The projection reproduced every imported file except the corrected OpenCode checksum. `project.py check` passes on 24 files. |
-| 4 | Remove out-of-scope producers | Planned | `go list -deps ./cmd/git-attributed` shows only the candidate closure. Each removed test maps to a removed capability. |
+| 4 | Remove out-of-scope producers | Done | `go list -deps ./cmd/git-attributed` lists the 16-package candidate closure. Each removed test maps to a removed capability, and the 16-stage smoke suite passes. |
 | 5 | Decide legacy note compatibility | Planned | A fixture from an upstream install reads correctly, or the documents state that it is not read. |
 
 ### Project harness integrations
@@ -107,14 +107,36 @@ The first payload change after parity removed the upstream PromptScript names:
 | `# promptscript-generated:<tag>` hook markers | `# git-attributed-hook:<tag>` |
 | `PROMPTSCRIPT_PROJECT_ROOT` and `$promptscriptProjectRoot` | `ATTRIBUTED_PROJECT_ROOT` and `$attributedProjectRoot` |
 
-The installers and the `update` hook refresh in `internal/app/update.go` use the same paths. All 32 projected POSIX hook commands ran under `sh` with a stub `git-attributed`. Each one reached the project root and called its `portable-<agent>` checkpoint, or failed with its message when the root was missing. The PowerShell variants were not run.
+The installers and the `update` hook refresh used the same paths until slice 4 removed them. All 32 projected POSIX hook commands ran under `sh` with a stub `git-attributed`. Each one reached the project root and called its `portable-<agent>` checkpoint, or failed with its message when the root was missing. The PowerShell variants were not run.
 
 A projected file proves only what the package contains. Harness discovery and hook delivery still need evidence from a live session. These gaps remain:
 
-- No release exists, so setup commands that download the binary fail.
+- No release exists. The setup commands find `git-attributed` on `PATH` and stop if it is missing. The OpenCode setup command still downloads its plugin from a release tag, so that step fails until a release exists.
 - The repository publishes no Claude Code or Factory marketplace listing and no Gemini extension manifest, so the package installs in the harness README do not work yet.
 - `git-attributed install-hooks` writes the Claude Code and Factory hooks from Go in `internal/hooks`. The projection does not own those hooks.
 
 ### Remove out-of-scope producers
 
-Remove `dashboard`, `report`, `disclosure`, `ci`, and `runner` with their commands: `dashboard`, `stats`, `check`, `disclosure`, `ci install`, `update`, and `version --check`. `internal/app/product.go` also calls `ci` from the install and uninstall paths, which provision forge workflows, so trim those callers in the same slice. Remove token accounting from `blame --tokens` and the usage collectors while keeping old notes that carry token fields readable. Remove `install.sh`, `install.ps1`, `action.yml`, and `action/` with the update path, since they download releases that do not exist yet. Keep `transcript` where model resolution needs it.
+Slice 4 removed these capabilities. Each one went with its packages, callers, and tests:
+
+| Capability | Removed |
+| --- | --- |
+| HTML dashboards, statistics, and policy checks | The `dashboard`, `stats`, and `check` commands, and the `dashboard` and `report` packages |
+| Compliance disclosure | The `disclosure` command and package |
+| Forge workflows | The `ci` command and package, workflow provisioning in `install-hooks` and removal in `uninstall`, `action.yml`, and `action/` |
+| Self-update and release checks | The `update` command, `version --check`, the `runner` package, the release-tag helpers in `internal/version`, `install.sh`, and `install.ps1` |
+| Token accounting | `blame --tokens` and the transcript usage collector. Capture no longer records usage. |
+
+These capabilities remain. `transcript` still resolves the model from session files. `parseRevisionRange` moved to `verify.go`, its only remaining caller. `shortCommit` moved to `product.go` for the same reason. Notes and pending checkpoints that an older producer wrote with token usage still parse, and annotation still folds their usage into note sessions. The setup commands no longer download the binary. They find `git-attributed` on `PATH` and stop with build instructions if it is missing.
+
+A test checks that each removed command now fails as unknown. The smoke suite has 16 stages. Its report stage now runs `verify` and both exports, and checks that each removed command exits 2. It dropped the dashboard stage.
+
+| Measure | Import `11c6d61` | After slice 4 |
+| --- | ---: | ---: |
+| Project packages linked into the CLI | 20 | 16 |
+| Tracked files | 201 | 176 |
+| Non-test Go source | 50 files, 717,394 bytes | 38 files, 519,538 bytes |
+| Go test source | 95 files, 1,458,314 bytes | 70 files, 1,130,460 bytes |
+| Stripped CLI, Darwin arm64, Go 1.27.3 | 6,218,162 bytes | 4,229,586 bytes |
+
+At slice 4, `go test ./...` passed 18 packages, 718 top-level tests and fuzz targets, and 1,263 subtests with no skips. The binary SHA-256 was `d7de2982ede9707c8efc8f08b4af66190c00d4edb423e498e0990ae336b701e9`, built with the baseline flags.

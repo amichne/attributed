@@ -3,12 +3,10 @@ package app
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -82,220 +80,6 @@ func TestProductCommandFlow(t *testing.T) {
 	if code != ExitSuccess || err != nil || stderr != "" || !strings.Contains(stdout, "Pending checkpoints: 0") {
 		t.Fatalf("text status = %d, %q, %q, %v", code, stdout, stderr, err)
 	}
-	dashboardPath := filepath.Join(t.TempDir(), "dashboard.html")
-	code, stdout, stderr, err = appRun(root, now, nil, "dashboard", "--output", dashboardPath, "file.txt")
-	if code != ExitSuccess || err != nil || stdout != dashboardPath+"\n" || stderr != "" {
-		t.Fatalf("dashboard file = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-	info, err := os.Stat(dashboardPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("dashboard mode = %o", info.Mode().Perm())
-	}
-	data, err := os.ReadFile(dashboardPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(data, []byte("file.txt")) ||
-		!bytes.Contains(data, []byte(">2</strong>")) ||
-		!bytes.Contains(data, []byte("attributed lines")) ||
-		!bytes.Contains(data, []byte("droid/unknown")) ||
-		bytes.Contains(data, []byte("https://")) {
-		t.Fatalf("dashboard content missing expected data")
-	}
-	allPath := filepath.Join(t.TempDir(), "all.html")
-	code, stdout, stderr, err = appRun(root, now, nil, "dashboard", "--output", allPath)
-	if code != ExitSuccess || err != nil || stdout != allPath+"\n" || stderr != "" {
-		t.Fatalf("dashboard all = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-	allData, err := os.ReadFile(allPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(allData, []byte("second.txt")) ||
-		!bytes.Contains(allData, []byte(">2</strong><span>files")) {
-		t.Fatalf("dashboard all content missing second file")
-	}
-	code, stdout, stderr, err = appRun(root, now, nil, "dashboard", "file.txt")
-	if code != ExitSuccess || err != nil || stderr != "" {
-		t.Fatalf("dashboard temp = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-	tempPath := strings.TrimSpace(stdout)
-	t.Cleanup(func() { _ = os.Remove(tempPath) })
-	if !strings.HasSuffix(tempPath, ".html") {
-		t.Fatalf("dashboard temp path = %q", tempPath)
-	}
-	if _, err := os.Stat(tempPath); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestDashboardRefusesExistingOutput(t *testing.T) {
-	t.Parallel()
-	root := appRepo(t)
-	appWrite(t, root, "file.txt", "content\n")
-	appCommit(t, root, "base")
-	if code, _, _, err := appRun(root, time.Time{}, nil, "annotate"); code != ExitSuccess || err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "dashboard.html")
-	const existing = "keep\n"
-	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	code, _, _, err := appRun(root, time.Time{}, nil, "dashboard", "--output", path)
-	if code != ExitFailure || err == nil {
-		t.Fatalf("dashboard overwrite = %d, %v", code, err)
-	}
-	data, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if string(data) != existing {
-		t.Fatalf("existing dashboard changed to %q", data)
-	}
-	for _, output := range []string{"bad\nname.html", "bad\tname.html"} {
-		code, _, _, err := appRun(root, time.Time{}, nil, "dashboard", "--output", output)
-		if code != ExitFailure || err == nil {
-			t.Fatalf("dashboard output %q = %d, %v", output, code, err)
-		}
-	}
-	code, _, _, err = appRun(root, time.Time{}, nil, "dashboard", "--output", "-")
-	if code != ExitFailure || err == nil {
-		t.Fatalf("dashboard stdout output = %d, %v", code, err)
-	}
-}
-
-func TestDashboardRangeModeRendersAggregateWithoutSourceLines(t *testing.T) {
-	t.Parallel()
-	root := appRepo(t)
-	appWrite(t, root, "file.txt", "one\n")
-	appWrite(t, root, "older-only.txt", "older-only-source-string\n")
-	appCommit(t, root, "one")
-	first := appHead(t, root)
-	appWrite(t, root, "file.txt", "one\ntwo\n")
-	appWrite(t, root, "second.txt", "three\n")
-	appCommit(t, root, "two")
-	second := appHead(t, root)
-	repo, err := gitcmd.Discover(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	olderBlob, exists, err := repo.BlobID(first, "older-only.txt")
-	if err != nil || !exists {
-		t.Fatalf("BlobID = %q, %t, %v", olderBlob, exists, err)
-	}
-	writeDashboardTestNote(t, repo, first, model.Note{
-		Version: model.NoteVersion,
-		Files: map[string]model.NoteFile{
-			"older-only.txt": {
-				Blob: olderBlob,
-				Ranges: []model.Range{{Start: 1, End: 1, Attribution: model.Attribution{
-					Author: model.AuthorHuman,
-				}}},
-			},
-		},
-	})
-	blob, exists, err := repo.BlobID(second, "file.txt")
-	if err != nil || !exists {
-		t.Fatalf("BlobID = %q, %t, %v", blob, exists, err)
-	}
-	secondBlob, exists, err := repo.BlobID(second, "second.txt")
-	if err != nil || !exists {
-		t.Fatalf("second BlobID = %q, %t, %v", secondBlob, exists, err)
-	}
-	writeDashboardTestNote(t, repo, second, model.Note{
-		Version: model.NoteVersion,
-		Files: map[string]model.NoteFile{
-			"file.txt": {
-				Blob: blob,
-				Ranges: []model.Range{
-					{Start: 1, End: 1, Attribution: model.Attribution{Author: model.AuthorHuman}},
-					{Start: 2, End: 2, Attribution: model.Attribution{
-						Author: model.AuthorAI, Agent: "droid", Model: "model",
-					}},
-				},
-			},
-			"second.txt": {
-				Blob: secondBlob,
-				Ranges: []model.Range{{Start: 1, End: 1, Attribution: model.Attribution{
-					Author: model.AuthorHumanOverride, Agent: "droid", Model: "model",
-				}}},
-			},
-		},
-	})
-
-	path := filepath.Join(t.TempDir(), "range.html")
-	code, stdout, stderr, err := appRun(root, zeroTime(), nil,
-		"dashboard", "--range", first+".."+second, "--output", path)
-	if code != ExitSuccess || err != nil || stdout != path+"\n" || stderr != "" {
-		t.Fatalf("dashboard range = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatal(err)
-	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("range dashboard mode = %o", info.Mode().Perm())
-	}
-	text := string(data)
-	for _, want := range []string{
-		"Commit trend",
-		"Author classes",
-		"file.txt",
-		"second.txt",
-		"droid",
-		"model",
-		"human-override",
-		"range " + first + ".." + second,
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("range dashboard missing %q", want)
-		}
-	}
-	if strings.Contains(text, "one\ntwo") || strings.Contains(text, "three\n") {
-		t.Fatal("range dashboard rendered source lines")
-	}
-
-	repoPath := filepath.Join(t.TempDir(), "repo.html")
-	code, stdout, stderr, err = appRun(root, zeroTime(), nil,
-		"dashboard", "--repo", "--output", repoPath)
-	if code != ExitSuccess || err != nil || stdout == "" || stderr != "" {
-		t.Fatalf("dashboard repo = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-	repoData, err := os.ReadFile(repoPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repoText := string(repoData)
-	if !strings.Contains(repoText, "older-only.txt") {
-		t.Fatal("repository dashboard missing older commit content")
-	}
-	if strings.Contains(repoText, "older-only-source-string") {
-		t.Fatal("repository dashboard rendered source lines")
-	}
-
-	code, stdout, stderr, err = appRun(root, zeroTime(), nil,
-		"dashboard", "--range", first+".."+second, "file.txt")
-	if code != ExitUsage || err == nil || stdout != "" ||
-		!strings.Contains(stderr, "cannot be combined") {
-		t.Fatalf("dashboard range file = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-}
-
-func writeDashboardTestNote(t *testing.T, repo *gitcmd.Repo, commit string, note model.Note) {
-	t.Helper()
-	data, err := notes.Encode(note)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.WriteNote(commit, data); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestBlameTextRendersHumanOverrideMetadata(t *testing.T) {
@@ -325,29 +109,6 @@ func TestBlameTextRendersHumanOverrideMetadata(t *testing.T) {
 	if code != ExitSuccess || err != nil || stderr != "" ||
 		!strings.Contains(stdout, "human-override:droid/model") {
 		t.Fatalf("blame = %d, %q, %q, %v", code, stdout, stderr, err)
-	}
-}
-
-func TestDashboardTempOutputRemainsReserved(t *testing.T) {
-	t.Parallel()
-	file, path, err := createDashboardOutput(&Env{}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(path) })
-	other, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if other != nil {
-		_ = other.Close()
-	}
-	if !errors.Is(err, os.ErrExist) {
-		t.Fatalf("second create error = %v, want file exists", err)
-	}
-	if err := writeExclusiveOutput(file, path, []byte("report"), "dashboard"); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "report" {
-		t.Fatalf("dashboard data = %q, %v", data, err)
 	}
 }
 
@@ -432,8 +193,6 @@ func TestProductCommandUsageAndFailures(t *testing.T) {
 		{"blame missing file", "", []string{"blame"}, ExitUsage},
 		{"blame unknown flag", "", []string{"blame", "--bad", "file"}, ExitUsage},
 		{"status argument", "", []string{"status", "extra"}, ExitUsage},
-		{"dashboard too many files", "", []string{"dashboard", "one", "two"}, ExitUsage},
-		{"dashboard unknown flag", "", []string{"dashboard", "--bad"}, ExitUsage},
 		{"local notes without git", "", []string{"install-hooks", "--agent", "droid", "--local-notes"}, ExitUsage},
 		{"install conflicting scope", "", []string{"install-hooks", "--user", "--project"}, ExitUsage},
 		{"install unknown agent", "", []string{"install-hooks", "--agent", "other"}, ExitUsage},
@@ -452,7 +211,7 @@ func TestProductCommandUsageAndFailures(t *testing.T) {
 			}
 		})
 	}
-	for _, args := range [][]string{{"blame", "-h"}, {"status", "--help"}, {"dashboard", "-h"}, {"install-hooks", "-h"}, {"uninstall", "--help"}} {
+	for _, args := range [][]string{{"blame", "-h"}, {"status", "--help"}, {"install-hooks", "-h"}, {"uninstall", "--help"}} {
 		code, stdout, stderr, err := appRun(root, time.Time{}, nil, args...)
 		if code != ExitSuccess || err != nil || stdout == "" || stderr != "" {
 			t.Fatalf("Run(%v) help = %d, %q, %q, %v", args, code, stdout, stderr, err)

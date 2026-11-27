@@ -2,9 +2,9 @@
 
 This directory carries the two files each agent needs, ready to copy.
 
-No Attributed release exists yet. The setup commands download a release
-binary, so they fail until one is published. Until then, build
-`git-attributed` from source, put it on `PATH`, and copy the hook file.
+No Attributed release exists yet. Build `git-attributed` from source with
+Go 1.24 or later and put it on `PATH`. The setup commands find it there and
+stop if it is missing.
 
 ## Agents with a package
 
@@ -17,8 +17,8 @@ Gemini extension manifest those installs need yet.
 ## Agents you set up by copying
 
 Copy the setup command so the agent gains `/git-attributed-setup`, then run it.
-The command installs the verified binary, installs the Git hooks, and copies
-the hook file below. Copying the hook file by hand works too.
+The command finds the binary, installs the Git hooks, and copies the hook
+file below. Copying the hook file by hand works too.
 
 | Agent | Setup command | Copy it to | Hook file | Copy it to |
 | --- | --- | --- | --- | --- |
@@ -35,11 +35,11 @@ the hook file below. Copying the hook file by hand works too.
 too, so merge the `hooks` block instead of replacing the file. Every other
 hook file in this table is complete and can be copied as is.
 
-OpenCode's plugin is documented for Linux, macOS, and WSL. Its setup command
-lists the native Windows PowerShell steps as unverified, and `install.ps1`
-does not detect OpenCode. Because OpenCode loads the plugin as code, that
-setup command downloads it from a release tag and checks its SHA-256 before it
-moves the file into `.opencode/plugins`.
+OpenCode's plugin is documented for Linux, macOS, and WSL. Because OpenCode
+loads the plugin as code, its setup command downloads it from a release tag
+and checks its SHA-256 before it moves the file into `.opencode/plugins`.
+That download fails until a release exists, so copy the plugin from this
+directory until then.
 
 ## Why these files are safe to copy
 

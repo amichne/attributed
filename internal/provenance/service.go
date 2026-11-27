@@ -16,7 +16,6 @@ import (
 	"github.com/amichne/attributed/internal/notes"
 	"github.com/amichne/attributed/internal/preset"
 	"github.com/amichne/attributed/internal/store"
-	"github.com/amichne/attributed/internal/transcript"
 )
 
 const lockTimeout = 10 * time.Second
@@ -262,22 +261,8 @@ func Capture(repo *gitcmd.Repo, event preset.Event, now time.Time) (CaptureResul
 		record.Model = event.Model
 		record.Session = event.Session
 	}
-	// Usage enriches the checkpoint but is not evidence, so an unreadable
-	// transcript or an invalid block drops the usage and keeps the record.
-	if event.Type == model.AuthorAI && event.TranscriptPath != "" {
-		if usage, found, err := transcript.ResolveUsage(event.TranscriptPath); err == nil && found {
-			candidate := model.CheckpointUsage{
-				MsgID:      usage.MsgID,
-				TokensIn:   usage.TokensIn,
-				TokensOut:  usage.TokensOut,
-				CacheRead:  usage.CacheRead,
-				CacheWrite: usage.CacheWrite,
-			}
-			if model.ValidateCheckpointUsage(candidate) == nil {
-				record.Usage = &candidate
-			}
-		}
-	}
+	// Capture records no token usage. Checkpoints and notes that an older
+	// producer wrote with usage stay readable.
 	if err := dataStore.CheckCheckpointAppend(record, len(records)+len(logWarnings)); err != nil {
 		return CaptureResult{}, err
 	}
@@ -512,8 +497,7 @@ func Annotate(repo *gitcmd.Repo) (AnnotateResult, error) {
 	}
 	// A fast-forward brings commits made in another clone or on the forge.
 	// This clone has no evidence for them, and pre-push would share a
-	// guessed note that conflicts with the note from their author or the
-	// forge workflow.
+	// guessed note that conflicts with the note their author published.
 	if fastForward {
 		return AnnotateResult{
 			Commit:  head,
@@ -553,8 +537,9 @@ func Annotate(repo *gitcmd.Repo) (AnnotateResult, error) {
 	if state.LastAnnotatedCommit != "" && state.LastAnnotatedCommit != parent {
 		return AnnotateResult{}, fmt.Errorf("commit gap or divergent history: last annotated %s, HEAD parent %s", state.LastAnnotatedCommit, parent)
 	}
-	// A parent note fetched after HEAD moved, such as the forge note for a
-	// pulled commit, continues attribution even though the boundary is empty.
+	// A parent note fetched after HEAD moved, such as another clone's note
+	// for a pulled commit, continues attribution even though the boundary
+	// is empty.
 	if state.LastAnnotatedCommit == "" && parent != "" && annotationBoundary(repo, parent) == "" {
 		warnings = append(warnings, "initializing attribution on a repository with existing history")
 	}
