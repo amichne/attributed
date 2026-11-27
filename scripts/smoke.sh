@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Cross-platform release smoke test for a built git-attributed binary.
+# Smoke test for a built git-attributed binary.
 #
 # Drives the real product flow against a throwaway repository: hooks,
 # checkpoints, annotation, blame, rebase and partial-commit regressions,
-# path edge cases, linked worktrees, reports, and note sharing. Runs on
-# Linux, macOS, and Windows (Git Bash) with no dependencies beyond Git and
-# POSIX tools.
+# path edge cases, linked worktrees, verification, note sharing, and a
+# missing binary. Needs nothing beyond Git and POSIX tools.
 #
 # Usage: ATTRIBUTED_BIN=/path/to/git-attributed scripts/smoke.sh
 
@@ -199,7 +198,7 @@ NOTES_COUNT="$(git --git-dir="$WORK/remote.git" notes --ref=attributed list | wc
 [[ "$NOTES_COUNT" -ge 1 ]] || fail "notes missing on remote: $NOTES_COUNT"
 
 step "pre-push merges notes another clone pushed"
-# The other clone plays a teammate or the forge job. An empty template keeps
+# The other clone plays a teammate. An empty template keeps
 # hooks from a user-level Git template out of it. --no-local fetches through
 # the file transport instead of copying loose objects, so a background gc in
 # the remote cannot make the clone read a vanished object.

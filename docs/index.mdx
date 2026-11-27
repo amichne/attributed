@@ -1,0 +1,42 @@
+---
+title: "Attributed"
+sidebarTitle: "Overview"
+description: "See which lines in every commit an AI agent wrote, stored in Git notes beside your history."
+keywords: ["git-attributed", "AI attribution", "git notes", "blame"]
+---
+
+Attributed records which lines an AI agent wrote, commit by commit. Agent hooks snapshot each file before and after the agent edits it. When you commit, a Git hook matches those snapshots to what Git actually committed and writes the result to a Git note.
+
+![git attributed blame shows Ada's lines as human and Claude Code's lines as AI](/assets/blame.gif)
+
+## Install
+
+There is no release yet. Install from source with Go 1.24 or later on Linux or macOS:
+
+```bash
+go install github.com/amichne/attributed/cmd/git-attributed@latest
+```
+
+Put `$(go env GOPATH)/bin` on `PATH`, or `$(go env GOBIN)` if you set it. Git then runs the binary as `git attributed`.
+
+## Quick start
+
+In a repository you work on with Claude Code:
+
+```bash
+git attributed install-hooks --agent claude --git
+```
+
+Work as usual, then commit. Each commit gets a note:
+
+```bash
+git attributed blame path/to/file
+git attributed verify
+```
+
+Use `--agent droid` for Factory. Other agents copy a hook file from [`marketplace/harness`](https://github.com/amichne/attributed/tree/main/marketplace/harness) and run `git attributed install-hooks --agent none --git`. Add `--local-notes` to keep notes out of your pushes.
+
+## Next
+
+- [How Attributed uses Git](/git) lists every ref, file, and hook it touches, and how to read or remove them with plain Git.
+- [What you can rely on](/safety) separates the guarantees from the rough edges, including what happens on a machine without the binary.

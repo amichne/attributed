@@ -1,0 +1,41 @@
+---
+title: "What you can rely on"
+sidebarTitle: "Guarantees and limits"
+description: "What Attributed guarantees, where it stops on purpose, its rough edges, and how it behaves without the binary."
+keywords: ["safety", "guarantees", "limits", "missing binary"]
+---
+
+## Guarantees
+
+| Guarantee | What it means |
+| --- | --- |
+| Commits always land | Annotation runs after Git records the commit. If it fails, the commit stays and a message explains why. |
+| Notes are never overwritten | A write, import, or push that would replace a different note stops instead. |
+| Your hooks keep running | Attributed edits only its own marked block in each hook file and backs up the previous file. Uninstall removes just that block. |
+| Readable without Attributed | Notes are plain Git notes. `git notes --ref=attributed show <commit>` works after uninstalling. |
+| No network of its own | The only network traffic is the pre-push hook fetching and pushing `refs/notes/attributed` to the remote you are already pushing to. `--local-notes` turns that off. |
+| No prompts or transcripts | Notes hold line ranges and metadata, never conversation content. |
+
+## Without the binary
+
+A teammate may clone a repository whose `.claude/settings.json` includes Attributed's hooks, without installing Attributed. You may also uninstall the binary but leave the hooks. Either way, every managed hook checks for `git-attributed` first:
+
+- Git commands succeed and print nothing extra.
+- Agent hooks exit 0 silently, so the agent keeps working.
+- Commits made in the meantime get no note.
+
+When the binary returns, the next commit resumes annotation. It prints `resuming attribution after commits that were not annotated` once. Lines that passed through the unannotated commits show as `untracked`.
+
+Git hooks call the binary by its absolute path. If you move or reinstall it somewhere else, rerun `git attributed install-hooks` so the hooks find it again.
+
+## Where it stops on purpose
+
+- **A push with conflicting notes stops.** This happens when the remote changed or removed one of your notes, or when both sides wrote different notes for the same commit. Nothing changes, and the hook prints the manual merge steps.
+- **Annotation stops on divergent history.** If the last annotated commit is not in HEAD's history, Attributed will not guess. Commits still land, and no automatic recovery exists yet.
+
+## Rough edges
+
+- **Unobserved lines count as the commit author.** A line changed with no agent checkpoint is labeled human. Telling missing evidence apart from observed human edits is an open proposal.
+- **Concurrent shell edits can be ambiguous.** When two sessions run shell commands on the same file and the agent supplies no event ID, a checkpoint can't always be tied to one session.
+- **Attribution is self-reported.** Notes record what local hooks observed. Signing is tracked in [issue #8](https://github.com/amichne/attributed/issues/8).
+- **Platform and install paths.** Attributed supports Linux and macOS, and there is no release yet. The Factory and Gemini CLI marketplace installs have not been run against their published branches.

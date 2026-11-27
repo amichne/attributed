@@ -11,7 +11,6 @@ unverified.
 
 **1. Find the binary.**
 
-Attributed has no release yet, so this command does not download a binary.
 Find `git-attributed` on `PATH`.
 
 Linux, macOS, or WSL:
@@ -26,10 +25,9 @@ Native Windows PowerShell:
 $binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-If it is missing, stop. Tell the user to build it from an Attributed checkout
-with Go 1.24 or later, as in
-`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
-and then rerun this command. Run the remaining commands through the absolute
+If it is missing, stop. Tell the user to install it with Go 1.24 or later,
+`go install github.com/amichne/attributed/cmd/git-attributed@latest`, put
+`$(go env GOPATH)/bin` on `PATH`, and rerun this command. Run the remaining commands through the absolute
 `$binary` path, so setup does not depend on this process reloading `PATH`.
 PowerShell needs the call operator for that, as in `& $binary version`.
 Verify `$binary version`.
@@ -51,25 +49,24 @@ attribution without automatic note sharing.
 
 **3. Install the OpenCode plugin.**
 
-Install `marketplace/harness/opencode/git-attributed.ts` from the git-attributed
-release tag below into `.opencode/plugins/git-attributed.ts` of the user's
-project. OpenCode loads everything in that directory as code. The commands
-therefore download the plugin to a temporary file, compare its SHA-256 with
-the value below, and move it into place only when the two match. Each command
-stops at its first failed step and deletes the temporary file. Do not change
-the tag or the SHA-256. On a mismatch, stop and report both values.
+Install `marketplace/harness/opencode/git-attributed.ts` from the
+git-attributed repository into `.opencode/plugins/git-attributed.ts` of the
+user's project. OpenCode loads everything in that directory as code. The
+commands therefore download the plugin to a temporary file, compare its
+SHA-256 with the value below, and move it into place only when the two match.
+Each command stops at its first failed step and deletes the temporary file.
+Do not change the SHA-256. On a mismatch, stop and report both values.
 
 Linux, macOS, or WSL:
 
 ```sh
 (
   set -eu
-  tag=v1.8.0 # x-release-please-version
   sha256=c483c737589f19f259dbf35f6e9f85092cdd8c0b20916d45f90df689deb014c5
   plugin="$(mktemp)"
   trap 'rm -f "$plugin"' EXIT
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$plugin" \
-    "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/git-attributed.ts"
+    "https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/opencode/git-attributed.ts"
   if command -v sha256sum >/dev/null 2>&1; then
     digest_line="$(sha256sum "$plugin")"
   else
@@ -90,11 +87,10 @@ Native Windows PowerShell, where `curl` is an alias for `Invoke-WebRequest`
 and rejects the flags above:
 
 ```powershell
-$tag = "v1.8.0" # x-release-please-version
 $sha256 = "c483c737589f19f259dbf35f6e9f85092cdd8c0b20916d45f90df689deb014c5"
 $plugin = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ts")
 try {
-    irm "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/git-attributed.ts" -OutFile $plugin -ErrorAction Stop
+    irm "https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/opencode/git-attributed.ts" -OutFile $plugin -ErrorAction Stop
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $plugin -ErrorAction Stop).Hash
     if ($actual -ne $sha256) {
         throw "plugin checksum mismatch: want $sha256, got $actual"
@@ -121,6 +117,6 @@ have a dedicated plugin event. Do not edit the installed plugin.
 **4. Verify and report.**
 
 Run `"$binary" status`, or `& $binary status` in PowerShell. Tell the user to
-add the reported install directory to `PATH` and restart OpenCode so it loads
-the plugin. Stop and report the exact error when download, checksum, version,
-hook installation, or status verification fails.
+restart OpenCode so it loads the plugin. Stop and report the exact error when
+the plugin download, its checksum, hook installation, or status verification
+fails.

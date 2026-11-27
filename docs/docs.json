@@ -10,7 +10,11 @@
   "navigation": {
     "groups": [
       {
-        "group": "Upstream qualification",
+        "group": "Attributed",
+        "pages": ["index", "git", "safety"]
+      },
+      {
+        "group": "Background",
         "pages": ["baseline", "qualification", "extraction"]
       }
     ]
