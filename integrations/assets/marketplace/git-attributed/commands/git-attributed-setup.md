@@ -39,7 +39,7 @@ you are running:
 - Claude Code: `--agent claude`, and its project hook file is
   `.claude/settings.json`
 
-If that project hook file already contains `promptscript-generated`, keep it
+If that project hook file already contains `git-attributed-hook`, keep it
 and install only the Git hooks:
 
 ```sh

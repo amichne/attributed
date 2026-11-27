@@ -53,11 +53,11 @@ attribution without automatic note sharing.
 **3. Install the agent hook for this agent.**
 
 Copy `marketplace/harness/vscode/hooks.json` from the git-attributed repository into
-`.github/hooks/promptscript-vscode.json` of the user's project, creating parent directories as needed:
+`.github/hooks/git-attributed-vscode.json` of the user's project, creating parent directories as needed:
 
 ```sh
 curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o .github/hooks/promptscript-vscode.json --create-dirs \
+  -o .github/hooks/git-attributed-vscode.json --create-dirs \
   https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/vscode/hooks.json
 ```
 

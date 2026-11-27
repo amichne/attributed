@@ -97,11 +97,22 @@ uv run --locked --script tools/projection/project.py check
 
 The projection reproduced every imported file byte for byte, with one exception. The rename had left the OpenCode setup command's plugin checksum at upstream's digest, so setup would have refused the renamed plugin. The seal now supplies the projected plugin's digest. The projector tests cover rejected plans, sealing, publication, drift on a changed matcher, and a zero timeout. Pkl's `isPositive` admits zero, so the schema requires `this > 0`.
 
+The first payload change after parity removed the upstream PromptScript names:
+
+| Before | After |
+| --- | --- |
+| `.github/hooks/promptscript.json`, `.github/hooks/promptscript-vscode.json` | `.github/hooks/git-attributed.json`, `.github/hooks/git-attributed-vscode.json` |
+| `.grok/hooks/promptscript.json` | `.grok/hooks/git-attributed.json` |
+| `.opencode/plugins/promptscript.ts` and `marketplace/harness/opencode/promptscript.ts` | `.opencode/plugins/git-attributed.ts` and `marketplace/harness/opencode/git-attributed.ts` |
+| `# promptscript-generated:<tag>` hook markers | `# git-attributed-hook:<tag>` |
+| `PROMPTSCRIPT_PROJECT_ROOT` and `$promptscriptProjectRoot` | `ATTRIBUTED_PROJECT_ROOT` and `$attributedProjectRoot` |
+
+The installers and the `update` hook refresh in `internal/app/update.go` use the same paths. All 32 projected POSIX hook commands ran under `sh` with a stub `git-attributed`. Each one reached the project root and called its `portable-<agent>` checkpoint, or failed with its message when the root was missing. The PowerShell variants were not run.
+
 A projected file proves only what the package contains. Harness discovery and hook delivery still need evidence from a live session. These gaps remain:
 
 - No release exists, so setup commands that download the binary fail.
 - The repository publishes no Claude Code or Factory marketplace listing and no Gemini extension manifest, so the package installs in the harness README do not work yet.
-- The hook payloads still carry upstream PromptScript names, such as `PROMPTSCRIPT_PROJECT_ROOT`, `promptscript-generated` markers, and the `promptscript.json` hook file names. Renaming them is a payload change. It needs a matching change to the hook paths in `internal/app/update.go`.
 - `git-attributed install-hooks` writes the Claude Code and Factory hooks from Go in `internal/hooks`. The projection does not own those hooks.
 
 ### Remove out-of-scope producers

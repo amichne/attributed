@@ -43,7 +43,8 @@ class EnvironmentDirectory extends Root {
 
 const local function tag(id: String, capture: Capture): String = "\(id)-\(capture.suffix)"
 
-const local function marker(tag: String): String = "# promptscript-generated:\(tag)"
+/// Marks a projected hook so setup commands can recognize an installed one.
+const local function marker(tag: String): String = "# git-attributed-hook:\(tag)"
 
 const local function posixCheckpoint(id: String, kind: Kind, tag: String): String =
   "git-attributed checkpoint portable-\(id) --type \(kind) --hook-input stdin \(marker(tag))"
@@ -52,17 +53,17 @@ const local function powerShellCheckpoint(id: String, kind: Kind, tag: String): 
   "& 'git-attributed' 'checkpoint' 'portable-\(id)' '--type' '\(kind)' '--hook-input' 'stdin' \(marker(tag))"
 
 const local function gitRootMessage(id: String): String =
-  "PromptScript \(id) hook requires a Git worktree project root."
+  "git-attributed \(id) hook requires a Git worktree project root."
 
 /// The POSIX shell command for one capture under one root strategy.
 const function posixCommand(root: Root, id: String, capture: Capture): String =
   let (checkpoint = posixCheckpoint(id, capture.kind, tag(id, capture)))
     if (root is GitTopLevel)
-      #"PROMPTSCRIPT_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1; }; "#
-      + #"case "$PROMPTSCRIPT_PROJECT_ROOT" in *[![:space:]]*) ;; *) printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1 ;; esac; "#
-      + #"cd "$PROMPTSCRIPT_PROJECT_ROOT" && "# + checkpoint
+      #"ATTRIBUTED_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1; }; "#
+      + #"case "$ATTRIBUTED_PROJECT_ROOT" in *[![:space:]]*) ;; *) printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1 ;; esac; "#
+      + #"cd "$ATTRIBUTED_PROJECT_ROOT" && "# + checkpoint
     else if (root is EnvironmentDirectory)
-      #"if [ -z "${\#(root.variable):-}" ]; then printf '%s\n' 'PromptScript \#(id) hook requires non-empty \#(root.variable).' >&2; exit 1; fi; "#
+      #"if [ -z "${\#(root.variable):-}" ]; then printf '%s\n' 'git-attributed \#(id) hook requires non-empty \#(root.variable).' >&2; exit 1; fi; "#
       + #"cd "$\#(root.variable)" && "# + checkpoint
     else
       checkpoint
@@ -71,10 +72,10 @@ const function posixCommand(root: Root, id: String, capture: Capture): String =
 const function powerShellCommand(root: WorkingDirectory|GitTopLevel, id: String, capture: Capture): String =
   let (checkpoint = powerShellCheckpoint(id, capture.kind, tag(id, capture)))
     if (root is GitTopLevel)
-      #"$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; "#
-      + #"if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) "#
+      #"$attributedProjectRoot = git rev-parse --show-toplevel 2>$null; "#
+      + #"if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($attributedProjectRoot)) "#
       + #"{ [Console]::Error.WriteLine('\#(gitRootMessage(id))'); exit 1 }; "#
-      + #"Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; "#
+      + #"Set-Location -LiteralPath $attributedProjectRoot -ErrorAction Stop; "#
       + checkpoint
     else
       checkpoint

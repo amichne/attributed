@@ -4,8 +4,8 @@ Install git-attributed for the current operating system and activate
 attribution hooks. Never use `sudo`.
 
 On Windows, run OpenCode inside WSL and follow the Linux or macOS commands in
-the WSL shell. PromptScript 1.19.1 declares the generated plugin Unix-only,
-and native Windows plugin loading has not been verified. `install.ps1` does
+the WSL shell. The plugin is declared Unix-only, and native Windows plugin
+loading has not been verified. `install.ps1` does
 not detect OpenCode or install its plugin. If the user runs OpenCode natively
 on Windows, use the PowerShell commands below and tell the user that this
 setup is unverified.
@@ -57,8 +57,8 @@ attribution without automatic note sharing.
 
 **3. Install the OpenCode plugin.**
 
-Install `marketplace/harness/opencode/promptscript.ts` from the git-attributed
-release tag below into `.opencode/plugins/promptscript.ts` of the user's
+Install `marketplace/harness/opencode/git-attributed.ts` from the git-attributed
+release tag below into `.opencode/plugins/git-attributed.ts` of the user's
 project. OpenCode loads everything in that directory as code. The commands
 therefore download the plugin to a temporary file, compare its SHA-256 with
 the value below, and move it into place only when the two match. Each command
@@ -71,11 +71,11 @@ Linux, macOS, or WSL:
 (
   set -eu
   tag=v1.8.0 # x-release-please-version
-  sha256=bbe4a3c2264442b09172a4dde1406d88f5192e676ffdf7cc2118d69264bf2e3e
+  sha256=1c5cc40ecf0705b0a00367bee806b8f92a7ea0a914e6c4b9c2272fa06b4a6318
   plugin="$(mktemp)"
   trap 'rm -f "$plugin"' EXIT
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$plugin" \
-    "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/promptscript.ts"
+    "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/git-attributed.ts"
   if command -v sha256sum >/dev/null 2>&1; then
     digest_line="$(sha256sum "$plugin")"
   else
@@ -88,7 +88,7 @@ Linux, macOS, or WSL:
   fi
   mkdir -p .opencode/plugins
   chmod 644 "$plugin"
-  mv "$plugin" .opencode/plugins/promptscript.ts
+  mv "$plugin" .opencode/plugins/git-attributed.ts
 )
 ```
 
@@ -97,16 +97,16 @@ and rejects the flags above:
 
 ```powershell
 $tag = "v1.8.0" # x-release-please-version
-$sha256 = "bbe4a3c2264442b09172a4dde1406d88f5192e676ffdf7cc2118d69264bf2e3e"
+$sha256 = "1c5cc40ecf0705b0a00367bee806b8f92a7ea0a914e6c4b9c2272fa06b4a6318"
 $plugin = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ts")
 try {
-    irm "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/promptscript.ts" -OutFile $plugin -ErrorAction Stop
+    irm "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/git-attributed.ts" -OutFile $plugin -ErrorAction Stop
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $plugin -ErrorAction Stop).Hash
     if ($actual -ne $sha256) {
         throw "plugin checksum mismatch: want $sha256, got $actual"
     }
     New-Item -ItemType Directory -Force -Path .opencode/plugins -ErrorAction Stop | Out-Null
-    Move-Item -Force -LiteralPath $plugin .opencode/plugins/promptscript.ts -ErrorAction Stop
+    Move-Item -Force -LiteralPath $plugin .opencode/plugins/git-attributed.ts -ErrorAction Stop
 }
 catch {
     # Rethrow, so powershell -File exits non-zero when the download fails.
@@ -118,12 +118,11 @@ finally {
 }
 ```
 
-This generated PromptScript plugin captures OpenCode edit, write,
-apply_patch, and Bash tool events, and waits for each checkpoint before
-OpenCode continues. OpenCode does not include the active model in these events, so
-the checkpoint model stays `unknown`. MCP calls, some subagent paths, and
-failed tool calls do not have a dedicated plugin event. Do not edit the
-generated plugin.
+This plugin captures OpenCode edit, write, apply_patch, and Bash tool
+events, and waits for each checkpoint before OpenCode continues. OpenCode
+does not include the active model in these events, so the checkpoint model
+stays `unknown`. MCP calls, some subagent paths, and failed tool calls do not
+have a dedicated plugin event. Do not edit the installed plugin.
 
 **4. Verify and report.**
 

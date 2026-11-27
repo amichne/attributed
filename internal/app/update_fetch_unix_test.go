@@ -542,10 +542,10 @@ func TestRefreshHooksManualAgents(t *testing.T) {
 	if !strings.Contains(out, "https://github.com/amichne/attributed/raw/main/marketplace/harness/gemini/settings.json") {
 		t.Fatalf("stdout = %q, want gemini harness URL", out)
 	}
-	if !strings.Contains(out, ".opencode/plugins/promptscript.ts --create-dirs") {
+	if !strings.Contains(out, ".opencode/plugins/git-attributed.ts --create-dirs") {
 		t.Fatalf("stdout = %q, want OpenCode plugin destination", out)
 	}
-	if !strings.Contains(out, "https://github.com/amichne/attributed/raw/main/marketplace/harness/opencode/promptscript.ts") {
+	if !strings.Contains(out, "https://github.com/amichne/attributed/raw/main/marketplace/harness/opencode/git-attributed.ts") {
 		t.Fatalf("stdout = %q, want OpenCode plugin URL", out)
 	}
 	if !strings.Contains(out, "Merge the block for gemini instead of replacing the file.") {
@@ -573,7 +573,7 @@ func TestRefreshHooksManualAgentSourcesExist(t *testing.T) {
 		"windsurf": "hooks.json",
 		"copilot":  "hooks.json",
 		"grok":     "hooks.json",
-		"opencode": "promptscript.ts",
+		"opencode": "git-attributed.ts",
 	}
 	if len(manualAgents) != len(expected) {
 		t.Fatalf("manual agent count = %d, want %d", len(manualAgents), len(expected))

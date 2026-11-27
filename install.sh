@@ -267,10 +267,10 @@ if [ "$install_agent_hooks" != "0" ]; then
 	detected cursor .cursor && pending="$pending cursor:cursor:.cursor/hooks.json:hooks.json"
 	detected codex .codex && pending="$pending codex:codex:.codex/hooks.json:hooks.json"
 	detected windsurf .codeium && pending="$pending windsurf:windsurf:.windsurf/hooks.json:hooks.json"
-	detected code .vscode && pending="$pending copilot:copilot:.github/hooks/promptscript.json:hooks.json"
-	detected grok .grok && pending="$pending grok:grok:.grok/hooks/promptscript.json:hooks.json"
+	detected code .vscode && pending="$pending copilot:copilot:.github/hooks/git-attributed.json:hooks.json"
+	detected grok .grok && pending="$pending grok:grok:.grok/hooks/git-attributed.json:hooks.json"
 	detected opencode "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" &&
-		pending="$pending opencode:opencode:.opencode/plugins/promptscript.ts:promptscript.ts"
+		pending="$pending opencode:opencode:.opencode/plugins/git-attributed.ts:git-attributed.ts"
 	if [ -n "$pending" ]; then
 		printf 'Detected agents that need one project integration file:\n'
 		for entry in $pending; do

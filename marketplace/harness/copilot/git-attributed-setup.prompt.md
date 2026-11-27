@@ -53,11 +53,11 @@ attribution without automatic note sharing.
 **3. Install the agent hook for this agent.**
 
 Copy `marketplace/harness/copilot/hooks.json` from the git-attributed repository into
-`.github/hooks/promptscript.json` of the user's project, creating parent directories as needed:
+`.github/hooks/git-attributed.json` of the user's project, creating parent directories as needed:
 
 ```sh
 curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o .github/hooks/promptscript.json --create-dirs \
+  -o .github/hooks/git-attributed.json --create-dirs \
   https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/copilot/hooks.json
 ```
 

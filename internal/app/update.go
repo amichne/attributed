@@ -713,9 +713,9 @@ var manualAgents = []manualAgent{
 	{name: "cursor", command: "cursor", configDir: ".cursor", hookPath: ".cursor/hooks.json", sourceFile: hooksSourceFile},
 	{name: "codex", command: "codex", configDir: ".codex", hookPath: ".codex/hooks.json", sourceFile: hooksSourceFile},
 	{name: "windsurf", command: "windsurf", configDir: ".codeium", hookPath: ".windsurf/hooks.json", sourceFile: hooksSourceFile},
-	{name: "copilot", command: "code", configDir: ".vscode", hookPath: ".github/hooks/promptscript.json", sourceFile: hooksSourceFile},
-	{name: "grok", command: "grok", configDir: ".grok", hookPath: ".grok/hooks/promptscript.json", sourceFile: hooksSourceFile},
-	{name: openCodeAgent, command: openCodeAgent, hookPath: ".opencode/plugins/promptscript.ts", sourceFile: "promptscript.ts"},
+	{name: "copilot", command: "code", configDir: ".vscode", hookPath: ".github/hooks/git-attributed.json", sourceFile: hooksSourceFile},
+	{name: "grok", command: "grok", configDir: ".grok", hookPath: ".grok/hooks/git-attributed.json", sourceFile: hooksSourceFile},
+	{name: openCodeAgent, command: openCodeAgent, hookPath: ".opencode/plugins/git-attributed.ts", sourceFile: "git-attributed.ts"},
 }
 
 // refreshHooks converges managed hooks after a binary swap, mirroring the

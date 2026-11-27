@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'PromptScript gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type human --hook-input stdin # promptscript-generated:gemini-pre-edit",
+            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'git-attributed gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type human --hook-input stdin # git-attributed-hook:gemini-pre-edit",
             "timeout": 30000
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'PromptScript gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type human --hook-input stdin # promptscript-generated:gemini-shell-pre",
+            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'git-attributed gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type human --hook-input stdin # git-attributed-hook:gemini-shell-pre",
             "timeout": 30000
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'PromptScript gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type ai --hook-input stdin # promptscript-generated:gemini-post-edit",
+            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'git-attributed gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type ai --hook-input stdin # git-attributed-hook:gemini-post-edit",
             "timeout": 30000
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'PromptScript gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type ai --hook-input stdin # promptscript-generated:gemini-shell-post",
+            "command": "if [ -z \"${GEMINI_PROJECT_DIR:-}\" ]; then printf '%s\\n' 'git-attributed gemini hook requires non-empty GEMINI_PROJECT_DIR.' >&2; exit 1; fi; cd \"$GEMINI_PROJECT_DIR\" && git-attributed checkpoint portable-gemini --type ai --hook-input stdin # git-attributed-hook:gemini-shell-post",
             "timeout": 30000
           }
         ]

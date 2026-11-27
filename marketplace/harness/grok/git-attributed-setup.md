@@ -48,11 +48,11 @@ attribution without automatic note sharing.
 **3. Install the agent hook for this agent.**
 
 Copy `marketplace/harness/grok/hooks.json` from the git-attributed repository into
-`.grok/hooks/promptscript.json` of the user's project, creating parent directories as needed:
+`.grok/hooks/git-attributed.json` of the user's project, creating parent directories as needed:
 
 ```sh
 curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o .grok/hooks/promptscript.json --create-dirs \
+  -o .grok/hooks/git-attributed.json --create-dirs \
   https://raw.githubusercontent.com/amichne/attributed/main/marketplace/harness/grok/hooks.json
 ```
 

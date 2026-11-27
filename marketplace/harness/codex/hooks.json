@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PROMPTSCRIPT_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$PROMPTSCRIPT_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$PROMPTSCRIPT_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type human --hook-input stdin # promptscript-generated:codex-pre-edit",
-            "commandWindows": "$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) { [Console]::Error.WriteLine('PromptScript codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'human' '--hook-input' 'stdin' # promptscript-generated:codex-pre-edit",
+            "command": "ATTRIBUTED_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$ATTRIBUTED_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$ATTRIBUTED_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type human --hook-input stdin # git-attributed-hook:codex-pre-edit",
+            "commandWindows": "$attributedProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($attributedProjectRoot)) { [Console]::Error.WriteLine('git-attributed codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $attributedProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:codex-pre-edit",
             "timeout": 30,
             "statusMessage": "git-attributed: capturing pre-edit state"
           }
@@ -18,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PROMPTSCRIPT_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$PROMPTSCRIPT_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$PROMPTSCRIPT_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type human --hook-input stdin # promptscript-generated:codex-shell-pre",
-            "commandWindows": "$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) { [Console]::Error.WriteLine('PromptScript codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'human' '--hook-input' 'stdin' # promptscript-generated:codex-shell-pre",
+            "command": "ATTRIBUTED_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$ATTRIBUTED_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$ATTRIBUTED_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type human --hook-input stdin # git-attributed-hook:codex-shell-pre",
+            "commandWindows": "$attributedProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($attributedProjectRoot)) { [Console]::Error.WriteLine('git-attributed codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $attributedProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:codex-shell-pre",
             "timeout": 30,
             "statusMessage": "git-attributed: capturing pre-shell state"
           }
@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PROMPTSCRIPT_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$PROMPTSCRIPT_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$PROMPTSCRIPT_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type ai --hook-input stdin # promptscript-generated:codex-post-edit",
-            "commandWindows": "$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) { [Console]::Error.WriteLine('PromptScript codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'ai' '--hook-input' 'stdin' # promptscript-generated:codex-post-edit",
+            "command": "ATTRIBUTED_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$ATTRIBUTED_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$ATTRIBUTED_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type ai --hook-input stdin # git-attributed-hook:codex-post-edit",
+            "commandWindows": "$attributedProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($attributedProjectRoot)) { [Console]::Error.WriteLine('git-attributed codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $attributedProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:codex-post-edit",
             "timeout": 30,
             "statusMessage": "git-attributed: capturing AI edit"
           }
@@ -44,8 +44,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PROMPTSCRIPT_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$PROMPTSCRIPT_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'PromptScript codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$PROMPTSCRIPT_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type ai --hook-input stdin # promptscript-generated:codex-shell-post",
-            "commandWindows": "$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) { [Console]::Error.WriteLine('PromptScript codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'ai' '--hook-input' 'stdin' # promptscript-generated:codex-shell-post",
+            "command": "ATTRIBUTED_PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" || { printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1; }; case \"$ATTRIBUTED_PROJECT_ROOT\" in *[![:space:]]*) ;; *) printf '%s\\n' 'git-attributed codex hook requires a Git worktree project root.' >&2; exit 1 ;; esac; cd \"$ATTRIBUTED_PROJECT_ROOT\" && git-attributed checkpoint portable-codex --type ai --hook-input stdin # git-attributed-hook:codex-shell-post",
+            "commandWindows": "$attributedProjectRoot = git rev-parse --show-toplevel 2>$null; if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($attributedProjectRoot)) { [Console]::Error.WriteLine('git-attributed codex hook requires a Git worktree project root.'); exit 1 }; Set-Location -LiteralPath $attributedProjectRoot -ErrorAction Stop; & 'git-attributed' 'checkpoint' 'portable-codex' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:codex-shell-post",
             "timeout": 30,
             "statusMessage": "git-attributed: capturing AI shell changes"
           }

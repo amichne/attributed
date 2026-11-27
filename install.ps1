@@ -187,8 +187,8 @@ try {
             @{ Name = "cursor"; Command = "cursor"; Directory = ".cursor"; Source = "cursor"; Hook = ".cursor/hooks.json"; SourceFile = "hooks.json" },
             @{ Name = "codex"; Command = "codex"; Directory = ".codex"; Source = "codex"; Hook = ".codex/hooks.json"; SourceFile = "hooks.json" },
             @{ Name = "windsurf"; Command = "windsurf"; Directory = ".codeium"; Source = "windsurf"; Hook = ".windsurf/hooks.json"; SourceFile = "hooks.json" },
-            @{ Name = "copilot"; Command = "code"; Directory = ".vscode"; Source = "copilot"; Hook = ".github/hooks/promptscript.json"; SourceFile = "hooks.json" },
-            @{ Name = "grok"; Command = "grok"; Directory = ".grok"; Source = "grok"; Hook = ".grok/hooks/promptscript.json"; SourceFile = "hooks.json" }
+            @{ Name = "copilot"; Command = "code"; Directory = ".vscode"; Source = "copilot"; Hook = ".github/hooks/git-attributed.json"; SourceFile = "hooks.json" },
+            @{ Name = "grok"; Command = "grok"; Directory = ".grok"; Source = "grok"; Hook = ".grok/hooks/git-attributed.json"; SourceFile = "hooks.json" }
         ) | Where-Object { Test-Agent -Command $_.Command -ConfigDirectory $_.Directory }
         if ($pending) {
             Write-Output "Detected agents that need one project integration file:"

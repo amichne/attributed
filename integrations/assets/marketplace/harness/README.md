@@ -22,13 +22,13 @@ the hook file below. Copying the hook file by hand works too.
 
 | Agent | Setup command | Copy it to | Hook file | Copy it to |
 | --- | --- | --- | --- | --- |
-| GitHub Copilot | [`copilot/git-attributed-setup.prompt.md`](copilot/git-attributed-setup.prompt.md) | `.github/prompts/` | [`copilot/hooks.json`](copilot/hooks.json) | `.github/hooks/promptscript.json` |
-| VS Code Agent | [`vscode/git-attributed-setup.prompt.md`](vscode/git-attributed-setup.prompt.md) | `.github/prompts/` | [`vscode/hooks.json`](vscode/hooks.json) | `.github/hooks/promptscript-vscode.json` |
+| GitHub Copilot | [`copilot/git-attributed-setup.prompt.md`](copilot/git-attributed-setup.prompt.md) | `.github/prompts/` | [`copilot/hooks.json`](copilot/hooks.json) | `.github/hooks/git-attributed.json` |
+| VS Code Agent | [`vscode/git-attributed-setup.prompt.md`](vscode/git-attributed-setup.prompt.md) | `.github/prompts/` | [`vscode/hooks.json`](vscode/hooks.json) | `.github/hooks/git-attributed-vscode.json` |
 | Cursor | [`cursor/git-attributed-setup.md`](cursor/git-attributed-setup.md) | `.cursor/commands/` | [`cursor/hooks.json`](cursor/hooks.json) | `.cursor/hooks.json` |
 | Codex | [`codex/git-attributed-setup.md`](codex/git-attributed-setup.md) | `~/.codex/prompts/` | [`codex/hooks.json`](codex/hooks.json) | `.codex/hooks.json` |
 | Windsurf | [`windsurf/git-attributed-setup.md`](windsurf/git-attributed-setup.md) | `.windsurf/workflows/` | [`windsurf/hooks.json`](windsurf/hooks.json) | `.windsurf/hooks.json` |
-| Grok | [`grok/git-attributed-setup.md`](grok/git-attributed-setup.md) | the prompt directory your build reads | [`grok/hooks.json`](grok/hooks.json) | `.grok/hooks/promptscript.json` |
-| OpenCode | [`opencode/git-attributed-setup.md`](opencode/git-attributed-setup.md) | `.opencode/commands/` | [`opencode/promptscript.ts`](opencode/promptscript.ts) | `.opencode/plugins/promptscript.ts` |
+| Grok | [`grok/git-attributed-setup.md`](grok/git-attributed-setup.md) | the prompt directory your build reads | [`grok/hooks.json`](grok/hooks.json) | `.grok/hooks/git-attributed.json` |
+| OpenCode | [`opencode/git-attributed-setup.md`](opencode/git-attributed-setup.md) | `.opencode/commands/` | [`opencode/git-attributed.ts`](opencode/git-attributed.ts) | `.opencode/plugins/git-attributed.ts` |
 | Gemini CLI | none | | [`gemini/settings.json`](gemini/settings.json) | merge into `.gemini/settings.json` |
 
 `.gemini/settings.json` and `.claude/settings.json` hold unrelated settings
