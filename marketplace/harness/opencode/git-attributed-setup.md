@@ -65,7 +65,7 @@ Linux, macOS, or WSL:
 (
   set -eu
   tag=v1.8.0 # x-release-please-version
-  sha256=1c5cc40ecf0705b0a00367bee806b8f92a7ea0a914e6c4b9c2272fa06b4a6318
+  sha256=c483c737589f19f259dbf35f6e9f85092cdd8c0b20916d45f90df689deb014c5
   plugin="$(mktemp)"
   trap 'rm -f "$plugin"' EXIT
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$plugin" \
@@ -91,7 +91,7 @@ and rejects the flags above:
 
 ```powershell
 $tag = "v1.8.0" # x-release-please-version
-$sha256 = "1c5cc40ecf0705b0a00367bee806b8f92a7ea0a914e6c4b9c2272fa06b4a6318"
+$sha256 = "c483c737589f19f259dbf35f6e9f85092cdd8c0b20916d45f90df689deb014c5"
 $plugin = Join-Path ([IO.Path]::GetTempPath()) ("git-attributed-" + [guid]::NewGuid() + ".ts")
 try {
     irm "https://raw.githubusercontent.com/amichne/attributed/$tag/marketplace/harness/opencode/git-attributed.ts" -OutFile $plugin -ErrorAction Stop

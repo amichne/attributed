@@ -260,7 +260,7 @@ func changeSelectedGitHooks(
 		if err != nil {
 			return nil, err
 		}
-		didChange, err := changeGitHook(path, spec.command, spec.install)
+		didChange, err := changeGitHook(path, guardedGitHookCommand(executable, spec.command), spec.install)
 		if err != nil {
 			return nil, err
 		}
@@ -1478,11 +1478,15 @@ func agentSpecs(agent, executable string) map[string][]hookSpec {
 	case "claude":
 		editMatcher = "Write|Edit|MultiEdit"
 	}
-	editPre := quoteExecutable(executable) + " checkpoint " + agent + " --managed-by git-attributed --type human --hook-input stdin"
-	editPost := quoteExecutable(executable) + " checkpoint " + agent + " --managed-by git-attributed --type ai --hook-input stdin"
+	checkpoint := func(kind string) string {
+		return guardedAgentCommand(executable, quoteExecutable(executable)+
+			" checkpoint "+agent+" --managed-by git-attributed --type "+kind+" --hook-input stdin")
+	}
+	editPre := checkpoint("human")
+	editPost := checkpoint("ai")
 	shellMatcher := "Bash|Shell|RunCommand|run_command|Execute|execute_command|Terminal"
-	shellPre := quoteExecutable(executable) + " checkpoint " + agent + " --managed-by git-attributed --type human --hook-input stdin"
-	shellPost := quoteExecutable(executable) + " checkpoint " + agent + " --managed-by git-attributed --type ai --hook-input stdin"
+	shellPre := checkpoint("human")
+	shellPost := checkpoint("ai")
 	return map[string][]hookSpec{
 		"PreToolUse": {{
 			matcher: editMatcher,
@@ -1503,6 +1507,62 @@ func agentSpecs(agent, executable string) map[string][]hookSpec {
 
 func quoteExecutable(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
+}
+
+// Missing-binary guards keep managed hooks silent and successful when
+// git-attributed is not installed, for example on a teammate's machine that
+// shares a committed agent config, or after the binary was removed. A
+// guarded hook then records nothing and Git and the agent carry on.
+const (
+	guardProbe        = "command -v "
+	guardQuiet        = " >/dev/null 2>&1"
+	agentGuardSuffix  = guardQuiet + " || exit 0; "
+	gitHookGuardThen  = guardQuiet + "; then\n"
+	gitHookGuardClose = "\nfi"
+)
+
+// guardedAgentCommand prefixes an agent hook command with an early exit
+// when executable is missing. An agent hook runs alone, so exiting is safe.
+func guardedAgentCommand(executable, command string) string {
+	return guardProbe + quoteExecutable(executable) + agentGuardSuffix + command
+}
+
+// guardedGitHookCommand runs command only while executable is present. It
+// cannot exit early, because user hook code may follow the managed block.
+func guardedGitHookCommand(executable, command string) string {
+	return "if " + guardProbe + quoteExecutable(executable) + gitHookGuardThen + command + gitHookGuardClose
+}
+
+// cutAgentGuard returns the command behind a missing-binary guard for a
+// git-attributed executable, or the command unchanged without a guard.
+func cutAgentGuard(command string) string {
+	rest, ok := strings.CutPrefix(command, guardProbe)
+	if !ok {
+		return command
+	}
+	quoted, inner, ok := strings.Cut(rest, agentGuardSuffix)
+	if !ok || !commandHasGitAttributedExecutable(quoted+guardQuiet, guardQuiet) {
+		return command
+	}
+	return inner
+}
+
+// cutGitHookGuard returns the command inside a missing-binary guard for a
+// git-attributed executable, or the command unchanged without a guard.
+func cutGitHookGuard(command string) string {
+	rest, ok := strings.CutPrefix(command, "if "+guardProbe)
+	if !ok {
+		return command
+	}
+	quoted, body, ok := strings.Cut(rest, gitHookGuardThen)
+	if !ok || !commandHasGitAttributedExecutable(quoted+guardQuiet, guardQuiet) {
+		return command
+	}
+	inner, ok := strings.CutSuffix(body, gitHookGuardClose)
+	if !ok {
+		return command
+	}
+	return inner
 }
 
 func managedEntry(spec hookSpec) map[string]any {
@@ -1570,6 +1630,7 @@ func removeManagedHook(value any, spec hookSpec) (any, bool, bool) {
 }
 
 func managedAgentCommand(candidate string, spec hookSpec) bool {
+	candidate = cutAgentGuard(candidate)
 	signature := spec.command[strings.Index(spec.command, " checkpoint "):]
 	legacySignature := strings.Replace(signature, " --managed-by git-attributed", "", 1)
 	return commandHasGitAttributedExecutable(candidate, signature) ||
@@ -1958,7 +2019,7 @@ func managedGitHookBlock(block string) bool {
 	if !strings.HasPrefix(block, prefix) || !strings.HasSuffix(block, suffix) {
 		return false
 	}
-	command := strings.TrimSuffix(strings.TrimPrefix(block, prefix), suffix)
+	command := cutGitHookGuard(strings.TrimSuffix(strings.TrimPrefix(block, prefix), suffix))
 	return isNotesPushCommand(command) ||
 		isPostCommitCommand(command) ||
 		isPostMergeCommand(command) ||

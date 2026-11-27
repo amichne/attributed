@@ -4,7 +4,7 @@
     "preToolUse": [
       {
         "type": "command",
-        "bash": "git-attributed checkpoint portable-copilot --type human --hook-input stdin # git-attributed-hook:copilot-pre-edit",
+        "bash": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-copilot --type human --hook-input stdin # git-attributed-hook:copilot-pre-edit",
         "powershell": "& 'git-attributed' 'checkpoint' 'portable-copilot' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:copilot-pre-edit",
         "cwd": ".",
         "matcher": "apply_patch|create_file|edit_file|write_file|replace_string_in_file|multi_replace_string_in_file",
@@ -12,7 +12,7 @@
       },
       {
         "type": "command",
-        "bash": "git-attributed checkpoint portable-copilot --type human --hook-input stdin # git-attributed-hook:copilot-shell-pre",
+        "bash": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-copilot --type human --hook-input stdin # git-attributed-hook:copilot-shell-pre",
         "powershell": "& 'git-attributed' 'checkpoint' 'portable-copilot' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:copilot-shell-pre",
         "cwd": ".",
         "matcher": "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell",
@@ -22,7 +22,7 @@
     "postToolUse": [
       {
         "type": "command",
-        "bash": "git-attributed checkpoint portable-copilot --type ai --hook-input stdin # git-attributed-hook:copilot-post-edit",
+        "bash": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-copilot --type ai --hook-input stdin # git-attributed-hook:copilot-post-edit",
         "powershell": "& 'git-attributed' 'checkpoint' 'portable-copilot' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:copilot-post-edit",
         "cwd": ".",
         "matcher": "apply_patch|create_file|edit_file|write_file|replace_string_in_file|multi_replace_string_in_file",
@@ -30,7 +30,7 @@
       },
       {
         "type": "command",
-        "bash": "git-attributed checkpoint portable-copilot --type ai --hook-input stdin # git-attributed-hook:copilot-shell-post",
+        "bash": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-copilot --type ai --hook-input stdin # git-attributed-hook:copilot-shell-post",
         "powershell": "& 'git-attributed' 'checkpoint' 'portable-copilot' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:copilot-shell-post",
         "cwd": ".",
         "matcher": "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell",
