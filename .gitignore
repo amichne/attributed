@@ -1,0 +1,27 @@
+# Development worktrees created during git-attributed work
+.worktrees/
+
+# Build artifacts
+/git-attributed
+dist/
+
+# Python bytecode from maintainer tools
+__pycache__/
+
+# Test and coverage artifacts
+*.test
+coverage.out
+coverage*.out
+
+# Local environment and hook backups
+.env
+.env.*
+!.env.example
+*.local
+*.git-attributed.bak
+
+# macOS Finder metadata
+.DS_Store
+
+# Playwright MCP browser session artifacts
+.playwright-mcp/

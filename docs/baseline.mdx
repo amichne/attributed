@@ -40,14 +40,14 @@ The build targets the host platform. Compare binary sizes on the same platform w
 
 ## Size before extraction
 
-| Metric | Pinned upstream | Extracted distribution |
-| --- | ---: | --- |
-| Tracked file content, all 379 blobs | 5,090,756 bytes | Pending extraction |
-| Non-test Go source, including tools, 56 files | 790,161 bytes | Pending extraction |
-| Go test source, 106 files | 1,582,306 bytes | Pending extraction |
-| Stripped CLI, Darwin arm64 | 6,218,162 bytes | Pending extraction |
+| Metric | Pinned upstream | Attributed import `11c6d61` |
+| --- | ---: | ---: |
+| Tracked file content | 379 blobs, 5,090,756 bytes | 201 blobs, 2,362,931 bytes |
+| Non-test Go source, including tools | 56 files, 790,161 bytes | 50 files, 717,394 bytes |
+| Go test source | 106 files, 1,582,306 bytes | 95 files, 1,458,314 bytes |
+| Stripped CLI, Darwin arm64 | 6,218,162 bytes | 6,218,162 bytes |
 
-The binary SHA-256 was `014a8b607030aca787ba16c3c27f517fb58a0b90367452a5b4a2a5ea3b0792c1`. Source counts use Git blob lengths, exclude Git history, and include each tracked path once. Recompute them from the pinned tree:
+The upstream binary SHA-256 was `014a8b607030aca787ba16c3c27f517fb58a0b90367452a5b4a2a5ea3b0792c1`. The renamed import binary was `0677b18ced7407a0412230855640e6ad8644ba4c1bd7855704ea5816481753fe`, built with the same flags. The import's tracked total includes 11 Attributed files, 29,399 bytes, that predate or carry out the import. It drops [upstream automation, agent configuration, and documents](/extraction#paths-left-out) and the `tools/validate` gate. The import removes no linked package, so the binary keeps its size. Source counts use Git blob lengths, exclude Git history, and include each tracked path once. Recompute them from the pinned tree:
 
 ```sh
 git ls-tree -rl HEAD | awk '$2 == "blob" {
@@ -71,6 +71,7 @@ git ls-tree -rl HEAD | awk '$2 == "blob" {
 | Binary smoke suite | Passed all 17 stages, including partial staging, rebase, linked worktrees, hook coexistence, independent clones, and refusal of conflicting or rewritten remote notes. |
 | Stock Git after uninstall | Passed in a disposable repository. A synthetic Claude edit produced a version 4 note with one AI-attributed line. Stock Git returned byte-identical note content before and after `uninstall --git`. |
 | Unknown authorship | Failed the proposed guarantee. With Git hooks installed and zero checkpoints, committing a new one-line file produced a note with `author: human` and the committer’s identity. |
-| Downstream acceptance | Not run. This checkout contains the qualification baseline. There is no extracted producer yet. |
+| Renamed import | Passed at `11c6d61`. 22 packages, 993 top-level tests and fuzz targets, and 1,565 subtests passed with no skips. The excluded `tools/validate` accounts for the whole difference: 78 passed and 3 skipped top-level tests, plus 212 subtests. All 17 smoke stages passed with `ATTRIBUTED_BIN` set to the renamed binary. |
+| Downstream acceptance | Not run. The import renames upstream but removes no capability yet. |
 
-The measured run covers one OS and architecture. The full upstream validation driver and hosted CI matrix were not run. Live harness sessions, exhaustive crash injection, and ambiguous concurrent capture still need direct evidence. Use the [qualification plan](/qualification) to select the next checks.
+The measured runs cover one OS and architecture. The full upstream validation driver and hosted CI matrix were not run. Live harness sessions, exhaustive crash injection, and ambiguous concurrent capture still need direct evidence. Use the [qualification plan](/qualification) to select the next checks and the [extraction slices](/extraction) for the order of changes.

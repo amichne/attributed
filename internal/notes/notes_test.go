@@ -1,0 +1,636 @@
+package notes
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/amichne/attributed/internal/gitcmd"
+	"github.com/amichne/attributed/internal/model"
+)
+
+func TestEncodeDecode(t *testing.T) {
+	t.Parallel()
+	note := model.Note{
+		Version: model.NoteVersion,
+		Files: map[string]model.NoteFile{
+			"b.go": {Blob: "bbbb", Ranges: []model.Range{{
+				Start: 1, End: 1,
+				Attribution: model.Attribution{Author: model.AuthorHuman},
+			}}},
+			"a.go": {Blob: "aaaa"},
+		},
+		Sessions: map[string]model.NoteSession{
+			"droid::session-1": {
+				Agent: "droid", Model: "model",
+				FirstTS: "2026-01-02T03:04:05Z", LastTS: "2026-01-02T03:04:06Z",
+				Added: 2, Deleted: 1, Accepted: 1, Overridden: 1,
+			},
+		},
+	}
+	first, err := Encode(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Encode(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) || !strings.HasSuffix(string(first), "\n") {
+		t.Fatalf("encoding is not canonical: %q and %q", first, second)
+	}
+	if strings.Index(string(first), `"a.go"`) > strings.Index(string(first), `"b.go"`) {
+		t.Fatalf("map keys are not sorted: %s", first)
+	}
+	got, err := Decode(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != note.Version || len(got.Files) != 2 || len(got.Sessions) != 1 {
+		t.Fatalf("Decode() = %+v", got)
+	}
+}
+
+func TestDecodeGoldenVersions(t *testing.T) {
+	t.Parallel()
+	for _, version := range []int{1, 2} {
+		data, err := os.ReadFile(filepath.Join("testdata", fmt.Sprintf("note-v%d.json", version)))
+		if err != nil {
+			t.Fatalf("read v%d fixture: %v", version, err)
+		}
+		note, err := Decode(data)
+		if err != nil {
+			t.Fatalf("Decode(v%d) = %v", version, err)
+		}
+		if note.Version != version || len(note.Files) != 1 {
+			t.Fatalf("Decode(v%d) = %+v", version, note)
+		}
+		file, ok := note.Files["src/example.go"]
+		if !ok || len(file.Ranges) != 1 || file.Ranges[0].Author != model.AuthorAI {
+			t.Fatalf("Decode(v%d) files = %+v", version, note.Files)
+		}
+		if version == 2 && note.Sessions["droid::session-1"].Accepted != 1 {
+			t.Fatalf("Decode(v2) sessions = %+v", note.Sessions)
+		}
+	}
+}
+
+func TestSessionKeysIncludeAgent(t *testing.T) {
+	t.Parallel()
+	note := model.Note{
+		Version: model.NoteVersion,
+		Sessions: map[string]model.NoteSession{
+			model.NoteSessionKey("droid", "shared"):  {Agent: "droid", Model: "model-a"},
+			model.NoteSessionKey("claude", "shared"): {Agent: "claude", Model: "model-b"},
+		},
+	}
+	data, err := Encode(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 2 ||
+		got.Sessions[model.NoteSessionKey("droid", "shared")].Model != "model-a" ||
+		got.Sessions[model.NoteSessionKey("claude", "shared")].Model != "model-b" {
+		t.Fatalf("session keys = %+v", got.Sessions)
+	}
+}
+
+func TestEncodeCurrentVersionGolden(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join("testdata", "note-v4.json")
+	fixture, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := Decode(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Sessions[model.NoteSessionKey("droid", "session-1")].TokensIn != 120 {
+		t.Fatalf("golden session tokens_in = %d, want 120", note.Sessions[model.NoteSessionKey("droid", "session-1")].TokensIn)
+	}
+	encoded, err := Encode(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compactFixture bytes.Buffer
+	if err := json.Compact(&compactFixture, fixture); err != nil {
+		t.Fatal(err)
+	}
+	compactFixture.WriteByte('\n')
+	if string(encoded) != compactFixture.String() {
+		t.Fatalf("Encode() differs from %s:\n%s", path, encoded)
+	}
+}
+
+func TestDecodeLegacyVersionsCarryNoIdentity(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"note-v1.json", "note-v2.json"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fixture, err := os.ReadFile(filepath.Join("testdata", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			note, err := Decode(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, file := range note.Files {
+				for _, value := range file.Ranges {
+					if value.Identity != "" {
+						t.Fatalf("%s %s carries identity %q", name, path, value.Identity)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsIdentityBeforeVersion3(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"version":2,"files":{"a.go":{"blob":"abcd1234",` +
+		`"ranges":[{"start":1,"end":1,"author":"human","identity":"john.doe"}]}},` +
+		`"sessions":{}}`)
+	if _, err := Decode(data); err == nil ||
+		!strings.Contains(err.Error(), "requires version 3") {
+		t.Fatalf("Decode(v2 with identity) error = %v", err)
+	}
+}
+
+func TestDecodeRejectsOversizedSessionUsage(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"version":4,"files":{"a.go":{"blob":"abcd1234",` +
+		`"ranges":[{"start":1,"end":1,"author":"ai","agent":"droid","model":"model","session":"s1"}]}},` +
+		`"sessions":{"droid::s1":{"agent":"droid","model":"model","added":1,"deleted":0,"accepted":1,"overridden":0,` +
+		`"tokens_in":` + strconv.FormatUint(model.MaxCheckpointUsageTokens+1, 10) + `}}}`)
+	if _, err := Decode(data); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Decode(oversized usage) error = %v", err)
+	}
+}
+
+func TestDecodeRejectsUsageBeforeVersion4(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"version":3,"files":{"a.go":{"blob":"abcd1234",` +
+		`"ranges":[{"start":1,"end":1,"author":"ai","agent":"droid","model":"model","session":"s1"}]}},` +
+		`"sessions":{"droid::s1":{"agent":"droid","model":"model","added":1,"deleted":0,"accepted":1,"overridden":0,"tokens_in":120}}}`)
+	if _, err := Decode(data); err == nil ||
+		!strings.Contains(err.Error(), "requires version 4") {
+		t.Fatalf("Decode(v3 with usage) error = %v", err)
+	}
+}
+
+func TestDecodeRejectsExplicitZeroUsageBeforeVersion4(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{"tokens_in", "tokens_out", "cache_read", "cache_write"} {
+		field := field
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			data := []byte(`{"version":3,"files":{"a.go":{"blob":"abcd1234",` +
+				`"ranges":[{"start":1,"end":1,"author":"ai","agent":"droid","model":"model","session":"s1"}]}},` +
+				`"sessions":{"droid::s1":{"agent":"droid","model":"model","added":1,"deleted":0,"accepted":1,"overridden":0,"` +
+				field + `":0}}}`)
+			if _, err := Decode(data); err == nil ||
+				!strings.Contains(err.Error(), "requires version 4") {
+				t.Fatalf("Decode(v3 with explicit zero %s) error = %v", field, err)
+			}
+		})
+	}
+}
+
+func TestValidateNoteRejectsUsageBeforeVersion4(t *testing.T) {
+	t.Parallel()
+	note := model.Note{
+		Version: model.NoteVersionV3,
+		Sessions: map[string]model.NoteSession{
+			"droid::s1": {
+				Agent:    "droid",
+				TokensIn: 1,
+			},
+		},
+	}
+	if err := validateNote(note); err == nil ||
+		!strings.Contains(err.Error(), "requires version 4") {
+		t.Fatalf("validateNote(v3 with usage) error = %v", err)
+	}
+}
+
+func TestDecodeAcceptsUsageAtVersion4(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"version":4,"files":{"a.go":{"blob":"abcd1234",` +
+		`"ranges":[{"start":1,"end":1,"author":"ai","agent":"droid","model":"model","session":"s1"}]}},` +
+		`"sessions":{"droid::s1":{"agent":"droid","model":"model","added":1,"deleted":0,"accepted":1,"overridden":0,` +
+		`"tokens_in":120,"tokens_out":34,"cache_read":56,"cache_write":78}}}`)
+	note, err := Decode(data)
+	if err != nil {
+		t.Fatalf("Decode(v4 with usage) error = %v", err)
+	}
+	session := note.Sessions[model.NoteSessionKey("droid", "s1")]
+	if session.TokensIn != 120 || session.TokensOut != 34 ||
+		session.CacheRead != 56 || session.CacheWrite != 78 {
+		t.Fatalf("session usage = %+v", session)
+	}
+}
+
+func TestDecodeNoteWireErrors(t *testing.T) {
+	t.Parallel()
+	valid := `{"version":2,"files":{},"sessions":{}}`
+	tests := []struct {
+		name    string
+		data    string
+		version int
+		want    string
+	}{
+		{
+			name:    "multiple JSON values",
+			data:    valid + ` {}`,
+			version: 2,
+			want:    "multiple JSON values",
+		},
+		{
+			name:    "invalid tail",
+			data:    valid + ` {`,
+			version: 2,
+			want:    "decode note tail",
+		},
+		{
+			name:    "version changed",
+			data:    valid,
+			version: 3,
+			want:    "note version changed",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := decodeNoteWire([]byte(test.data), test.version); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("decodeNoteWire() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestDecodeV2Sessions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		data string
+		err  bool
+	}{
+		{
+			name: "unknown field",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":{"agent":"droid","model":"model","first_ts":"2026-01-02T03:04:05Z","last_ts":"2026-01-02T03:04:05Z","added":1,"deleted":0,"accepted":1,"overridden":0,"extra":true}}}`,
+			err:  true,
+		},
+		{
+			name: "wrong field type",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":{"agent":"droid","model":"model","first_ts":"2026-01-02T03:04:05Z","last_ts":"2026-01-02T03:04:05Z","added":"one","deleted":0,"accepted":1,"overridden":0}}}`,
+			err:  true,
+		},
+		{
+			name: "null session",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":null}}`,
+			err:  true,
+		},
+		{
+			name: "invalid session shape",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":[]}}`,
+			err:  true,
+		},
+		{
+			name: "valid session",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":{"agent":"droid","model":"model","first_ts":"2026-01-02T03:04:05Z","last_ts":"2026-01-02T03:04:05Z","added":1,"deleted":0,"accepted":1,"overridden":0}}}`,
+		},
+		{
+			name: "negative counter",
+			data: `{"version":2,"files":{},"sessions":{"droid::session-1":{"agent":"droid","model":"model","first_ts":"2026-01-02T03:04:05Z","last_ts":"2026-01-02T03:04:05Z","added":-1,"deleted":0,"accepted":1,"overridden":0}}}`,
+			err:  true,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Decode([]byte(test.data))
+			if (err != nil) != test.err {
+				t.Fatalf("Decode() error = %v, want error: %t", err, test.err)
+			}
+		})
+	}
+}
+
+func TestEncodeDecodeErrors(t *testing.T) {
+	t.Parallel()
+	if _, err := Encode(model.Note{Version: 9}); err == nil {
+		t.Fatal("Encode accepted unknown version")
+	}
+	if _, err := Encode(model.Note{
+		Version: model.NoteVersion,
+		Files:   map[string]model.NoteFile{"file": {Blob: "bad"}},
+	}); err == nil {
+		t.Fatal("Encode accepted an invalid file")
+	}
+	for _, data := range []string{
+		`{`,
+		`{"version":9}`,
+		`{"version":1,"unknown":true}`,
+		`{"version":2,"sessions":[]}`,
+		`{"version":2,"files":{},"sessions":{"droid::":{"agent":"droid","model":"","first_ts":"","last_ts":"","added":0,"deleted":0,"accepted":0,"overridden":0}}}`,
+		`{"version":1,"files":{"file":{"blob":"bad"}}}`,
+		"{\"version\":1,\"files\":{\"bad\\npath\":{\"blob\":\"abcd\"}}}",
+		`{"version":1,"files":{"file":{"blob":"abcd","ranges":[{"start":2,"end":2,"author":"human"}]}}}`,
+		"{\"version\":1}\n{}",
+	} {
+		if _, err := Decode([]byte(data)); err == nil {
+			t.Fatalf("Decode accepted %q", data)
+		}
+	}
+}
+
+func TestCheckFileCount(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"version":1,"files":{"a":{"blob":"aaaa"},"b":{"blob":"bbbb"}}}`)
+	if err := CheckFileCount(data, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFileCount(data, 1); err == nil {
+		t.Fatal("CheckFileCount accepted too many files")
+	}
+	for _, data := range [][]byte{
+		[]byte(`[]`),
+		[]byte(`{"files":[]}`),
+		[]byte(`{"files":{"a":`),
+	} {
+		if err := CheckFileCount(data, 2); err == nil {
+			t.Fatalf("CheckFileCount accepted %s", data)
+		}
+	}
+}
+
+func TestNoteLimits(t *testing.T) {
+	t.Parallel()
+	files := make(map[string]model.NoteFile, MaxFiles+1)
+	var encoded strings.Builder
+	encoded.WriteString(`{"version":1,"files":{`)
+	for index := 0; index <= MaxFiles; index++ {
+		path := fmt.Sprintf("file-%03d", index)
+		files[path] = model.NoteFile{Blob: "aaaa"}
+		if index > 0 {
+			encoded.WriteByte(',')
+		}
+		fmt.Fprintf(&encoded, "%q:{\"blob\":\"aaaa\"}", path)
+	}
+	encoded.WriteString("}}")
+	if _, err := Encode(model.Note{Version: model.NoteVersion, Files: files}); err == nil {
+		t.Fatal("Encode accepted too many files")
+	}
+	if _, err := Decode([]byte(encoded.String())); err == nil {
+		t.Fatal("Decode accepted too many files")
+	}
+	largePath := strings.Repeat("a", MaxEncodedBytes)
+	if _, err := Encode(model.Note{
+		Version: model.NoteVersion,
+		Files:   map[string]model.NoteFile{largePath: {Blob: "aaaa"}},
+	}); err == nil {
+		t.Fatal("Encode accepted an oversized note")
+	}
+	if _, err := Decode(make([]byte, MaxEncodedBytes+1)); err == nil {
+		t.Fatal("Decode accepted an oversized note")
+	}
+}
+
+func TestFindFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notesGit(t, root, "init", "-b", "main")
+	notesGit(t, root, "config", "user.name", "Test User")
+	notesGit(t, root, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notesGit(t, root, "add", "file")
+	notesGit(t, root, "commit", "-m", "one")
+	head := strings.TrimSpace(notesGit(t, root, "rev-parse", "HEAD"))
+	repo, err := gitcmd.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, _, err := repo.BlobID(head, "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, warnings, err := FindFile(repo, "", "file", blob); err != nil || found || len(warnings) != 0 {
+		t.Fatalf("FindFile(empty) = %t, %v, %v", found, warnings, err)
+	}
+	if _, found, _, err := FindFile(repo, head, "file", blob); err != nil || found {
+		t.Fatalf("FindFile(no note) = %t, %v", found, err)
+	}
+	data, err := Encode(model.Note{
+		Version: model.NoteVersion,
+		Files: map[string]model.NoteFile{
+			"file": {
+				Blob: blob,
+				Ranges: []model.Range{{
+					Start: 1, End: 1,
+					Attribution: model.Attribution{Author: model.AuthorHuman},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WriteNote(head, data); err != nil {
+		t.Fatal(err)
+	}
+	note, found, warnings, err := FindFile(repo, head, "file", blob)
+	if err != nil || !found || len(warnings) != 0 || note.Files["file"].Blob != blob {
+		t.Fatalf("FindFile(valid) = %+v, %t, %v, %v", note, found, warnings, err)
+	}
+	if _, found, warnings, err := FindFile(repo, head, "file", "aaaa"); err != nil || found || len(warnings) != 1 {
+		t.Fatalf("FindFile(mismatch) = %t, %v, %v", found, warnings, err)
+	}
+}
+
+// finderHistory builds four commits. The first two carry notes for a and
+// b, the third carries an invalid note, and the fourth has none.
+func finderHistory(t *testing.T) (*gitcmd.Repo, string, map[string]string) {
+	t.Helper()
+	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notesGit(t, root, "init", "-b", "main")
+	notesGit(t, root, "config", "user.name", "Test User")
+	notesGit(t, root, "config", "user.email", "test@example.invalid")
+	var commits []string
+	for index, name := range []string{"a", "b", "c", "d"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		notesGit(t, root, "add", name)
+		notesGit(t, root, "commit", "-m", fmt.Sprintf("commit %d", index))
+		commits = append(commits, strings.TrimSpace(notesGit(t, root, "rev-parse", "HEAD")))
+	}
+	repo, err := gitcmd.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := commits[3]
+	blobs := map[string]string{}
+	for _, name := range []string{"a", "b"} {
+		blob, _, err := repo.BlobID(head, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blobs[name] = blob
+	}
+	for commit, files := range map[string][]string{commits[0]: {"a"}, commits[1]: {"a", "b"}} {
+		note := model.Note{Version: model.NoteVersion, Files: map[string]model.NoteFile{}}
+		for _, name := range files {
+			note.Files[name] = model.NoteFile{Blob: blobs[name], Ranges: []model.Range{{
+				Start: 1, End: 1,
+				Attribution: model.Attribution{Author: model.AuthorHuman},
+			}}}
+		}
+		data, err := Encode(note)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.WriteNote(commit, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.WriteNote(commits[2], []byte(`{"version":9}`)); err != nil {
+		t.Fatal(err)
+	}
+	return repo, head, blobs
+}
+
+func TestFinderWalksPastCommitsWithoutNotes(t *testing.T) {
+	t.Parallel()
+	repo, head, blobs := finderHistory(t)
+	finder := NewFinder(repo)
+	tests := []struct {
+		path  string
+		blob  string
+		found bool
+		warns int
+	}{
+		{path: "a", blob: blobs["a"], found: true, warns: 1},
+		{path: "b", blob: blobs["b"], found: true, warns: 1},
+		{path: "a", blob: blobs["b"], warns: 2},
+		{path: "d", blob: blobs["a"], warns: 1},
+	}
+	for _, test := range tests {
+		note, found, warnings, err := finder.Find(head, test.path, test.blob)
+		if err != nil || found != test.found || len(warnings) != test.warns {
+			t.Fatalf("Find(%s) = %t, %v, %v", test.path, found, warnings, err)
+		}
+		if test.found && len(note.Files) != 2 {
+			t.Fatalf("Find(%s) returned a note from the wrong commit: %+v", test.path, note)
+		}
+		want, wantFound, wantWarnings, wantErr := FindFile(repo, head, test.path, test.blob)
+		if found != wantFound || len(warnings) != len(wantWarnings) || (wantErr == nil) != (err == nil) ||
+			len(note.Files) != len(want.Files) {
+			t.Fatalf("Find(%s) differs from FindFile", test.path)
+		}
+	}
+}
+
+func TestFinderPastCacheBudgetReadsNotesAgain(t *testing.T) {
+	t.Parallel()
+	repo, head, blobs := finderHistory(t)
+	cached := NewFinder(repo)
+	uncached := NewFinder(repo)
+	uncached.cacheBudget = 0
+	for _, path := range []string{"a", "b", "a"} {
+		want, wantFound, wantWarnings, wantErr := cached.Find(head, path, blobs[path])
+		note, found, warnings, err := uncached.Find(head, path, blobs[path])
+		if err != nil || wantErr != nil || found != wantFound || !found ||
+			len(warnings) != len(wantWarnings) || len(note.Files) != len(want.Files) {
+			t.Fatalf("Find(%s) past the budget = %t, %v, %v, want %t, %v, %v",
+				path, found, warnings, err, wantFound, wantWarnings, wantErr)
+		}
+	}
+	if len(cached.decoded) == 0 || len(uncached.decoded) != 0 {
+		t.Fatalf("decoded notes kept = %d with budget, %d without", len(cached.decoded), len(uncached.decoded))
+	}
+}
+
+func TestFinderReportsUnreadableNote(t *testing.T) {
+	t.Parallel()
+	repo, head, blobs := finderHistory(t)
+	noted, err := repo.ListNotes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The note list still names the newest note, but its blob is gone.
+	invalid := noted[strings.TrimSpace(notesGit(t, repo.Root, "rev-parse", head+"~1"))]
+	object := filepath.Join(repo.GitDir, "objects", invalid[:2], invalid[2:])
+	if err := os.Remove(object); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := NewFinder(repo).Find(head, "a", blobs["a"]); err == nil {
+		t.Fatal("Find accepted a note blob it could not read")
+	}
+}
+
+func notesGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = root
+	command.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	out, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// TestDecodeRejectsTrailingData covers the strict-tail guard: a note
+// followed by a second JSON value or by malformed data is rejected.
+// The header stage already enforces single-value notes, so this pins
+// the rejection at whichever layer fires first.
+func TestDecodeRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	const validNote = `{"version":3,"files":{}}`
+	cases := []struct {
+		name string
+		data string
+	}{
+		{name: "second JSON value", data: validNote + " " + validNote},
+		{name: "malformed tail", data: validNote + " {bad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Decode([]byte(tc.data))
+			if err == nil {
+				t.Fatalf("Decode(%s) = nil error, want rejection", tc.name)
+			}
+		})
+	}
+}

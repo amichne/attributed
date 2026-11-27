@@ -1,0 +1,666 @@
+// Package preset converts supported agent hook payloads into edit events.
+package preset
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/amichne/attributed/internal/model"
+)
+
+const MaxInputBytes = 1 << 20
+
+// Event is one normalized agent event.
+type Event struct {
+	Kind           string
+	Type           model.Author
+	Agent          string
+	Model          string
+	Session        string
+	EventID        string
+	Paths          []string
+	TranscriptPath string
+}
+
+// FallbackModel marks AI attribution without a known model.
+const FallbackModel = "unknown"
+
+// Parse converts a supported preset payload. handled is false for a valid,
+// unrelated hook event.
+func Parse(name string, explicit model.Author, input io.Reader) (event Event, handled bool, err error) {
+	data, err := readBounded(input)
+	if err != nil {
+		return Event{}, false, err
+	}
+	switch name {
+	case "droid":
+		return parseToolHook("droid", explicit, data, []string{"Edit", "Create", "ApplyPatch"})
+	case "claude":
+		return parseToolHook("claude", explicit, data, []string{"Write", "Edit", "MultiEdit"})
+	case "agent-v1":
+		if explicit != "" {
+			return Event{}, false, errors.New("agent-v1 takes type from its payload")
+		}
+		return parseAgentV1(data)
+	default:
+		return parsePortablePreset(name, explicit, data)
+	}
+}
+
+// parsePortablePreset routes a portable-<agent> preset to its adapter.
+func parsePortablePreset(name string, explicit model.Author, data []byte) (Event, bool, error) {
+	agent, ok := strings.CutPrefix(name, "portable-")
+	if !ok || !slices.Contains(portableAgents, agent) {
+		return Event{}, false, fmt.Errorf("unknown preset %q", name)
+	}
+	return parsePortableHook(agent, explicit, data)
+}
+
+var portableAgents = []string{
+	"factory",
+	"claude",
+	"copilot",
+	"vscode",
+	"cursor",
+	"codex",
+	"gemini",
+	"windsurf",
+	"grok",
+	"opencode",
+}
+
+// toolHookPayload is the shared Droid and Claude Code hook input shape.
+type toolHookPayload struct {
+	SessionID       string          `json:"session_id"`
+	SessionIDCamel  string          `json:"sessionId"`
+	ConversationID  string          `json:"conversation_id"`
+	ToolName        string          `json:"tool_name"`
+	ToolNameCamel   string          `json:"toolName"`
+	ToolInput       json.RawMessage `json:"tool_input"`
+	ToolInputCamel  json.RawMessage `json:"toolInput"`
+	Model           string          `json:"model"`
+	ModelName       string          `json:"model_name"`
+	ModelNameCamel  string          `json:"modelName"`
+	TranscriptPath  string          `json:"transcript_path"`
+	ID              string          `json:"id"`
+	EventID         string          `json:"event_id"`
+	EventIDCamel    string          `json:"eventId"`
+	ToolUseID       string          `json:"tool_use_id"`
+	ToolUseIDCamel  string          `json:"toolUseId"`
+	ToolCallID      string          `json:"tool_call_id"`
+	ToolCallIDCamel string          `json:"toolCallId"`
+}
+
+func parseToolHook(agent string, explicit model.Author, data []byte, allowed []string) (Event, bool, error) {
+	if explicit != model.AuthorHuman && explicit != model.AuthorAI {
+		return Event{}, false, errors.New("explicit type must be human or ai")
+	}
+	var payload toolHookPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return Event{}, false, fmt.Errorf("decode %s hook input: %w", agent, err)
+	}
+	tool := shortToolName(firstValue(payload.ToolName, payload.ToolNameCamel))
+	if isShellOperation(tool) {
+		return toolShellEvent(agent, explicit, &payload)
+	}
+	if !slices.Contains(allowed, tool) {
+		return Event{}, false, nil
+	}
+	paths, err := toolInputPaths(tool, payload.ToolInput, payload.ToolInputCamel)
+	if err != nil {
+		return Event{}, false, err
+	}
+	paths = uniquePaths(paths)
+	if len(paths) == 0 {
+		return Event{}, false, errors.New("hook input contains no usable file path")
+	}
+	modelName := firstValue(payload.Model, payload.ModelName, payload.ModelNameCamel)
+	if modelName == "" {
+		modelName = FallbackModel
+	}
+	eventID := firstValue(
+		payload.ID, payload.EventID, payload.EventIDCamel,
+		payload.ToolUseID, payload.ToolUseIDCamel,
+		payload.ToolCallID, payload.ToolCallIDCamel,
+	)
+	event := Event{Kind: model.CheckpointKindEdit, Type: explicit, Paths: paths, EventID: eventID, TranscriptPath: payload.TranscriptPath}
+	if explicit != model.AuthorAI {
+		return event, true, nil
+	}
+	event.Agent = agent
+	event.Model = modelName
+	event.Session = firstValue(payload.SessionID, payload.SessionIDCamel, payload.ConversationID)
+	if err := model.ValidateAttribution(model.Attribution{
+		Author: event.Type, Agent: event.Agent, Model: event.Model, Session: event.Session,
+	}); err != nil {
+		return Event{}, false, err
+	}
+	return event, true, nil
+}
+
+// shortToolName strips any qualified tool prefix such as functions.Edit.
+func shortToolName(tool string) string {
+	if index := strings.LastIndex(tool, "."); index >= 0 {
+		return tool[index+1:]
+	}
+	return tool
+}
+
+// toolShellEvent builds the shell checkpoint of one tool hook payload.
+func toolShellEvent(agent string, explicit model.Author, payload *toolHookPayload) (Event, bool, error) {
+	eventID := firstValue(
+		payload.ID, payload.EventID, payload.EventIDCamel,
+		payload.ToolUseID, payload.ToolUseIDCamel,
+		payload.ToolCallID, payload.ToolCallIDCamel,
+	)
+	event, handled, err := shellEvent(agent, explicit,
+		firstValue(payload.Model, payload.ModelName, payload.ModelNameCamel),
+		firstValue(payload.SessionID, payload.SessionIDCamel, payload.ConversationID), eventID)
+	if err == nil && handled {
+		event.TranscriptPath = payload.TranscriptPath
+	}
+	return event, handled, err
+}
+
+// toolInputPaths extracts snapshot paths from the input of one edit tool.
+func toolInputPaths(tool string, toolInput, toolInputCamel json.RawMessage) ([]string, error) {
+	raw := toolInput
+	if len(raw) == 0 {
+		raw = toolInputCamel
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("tool_input is missing")
+	}
+	var input struct {
+		FilePath string `json:"file_path"`
+		Patch    string `json:"patch"`
+		Input    string `json:"input"`
+	}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil, fmt.Errorf("decode tool_input: %w", err)
+	}
+	if tool == "ApplyPatch" {
+		// Factory sends the ApplyPatch body in input; patch covers other surfaces.
+		return patchPaths(firstValue(input.Patch, input.Input))
+	}
+	if input.FilePath == "" {
+		return nil, errors.New("tool_input.file_path is missing")
+	}
+	return []string{input.FilePath}, nil
+}
+
+func parseAgentV1(data []byte) (Event, bool, error) {
+	var payload struct {
+		Type            string   `json:"type"`
+		AgentName       string   `json:"agent_name"`
+		Model           string   `json:"model"`
+		ConversationID  string   `json:"conversation_id"`
+		EditedFilepaths []string `json:"edited_filepaths"`
+		ID              string   `json:"id"`
+		EventID         string   `json:"event_id"`
+		EventIDCamel    string   `json:"eventId"`
+		ToolUseID       string   `json:"tool_use_id"`
+		ToolUseIDCamel  string   `json:"toolUseId"`
+		ToolCallID      string   `json:"tool_call_id"`
+		ToolCallIDCamel string   `json:"toolCallId"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return Event{}, false, fmt.Errorf("decode agent-v1 input: %w", err)
+	}
+	var author model.Author
+	kind := model.CheckpointKindEdit
+	switch payload.Type {
+	case "human":
+		author = model.AuthorHuman
+	case "ai_agent":
+		author = model.AuthorAI
+	case model.CheckpointKindShellPre:
+		author = model.AuthorHuman
+		kind = model.CheckpointKindShellPre
+	case model.CheckpointKindShellPost:
+		author = model.AuthorAI
+		kind = model.CheckpointKindShellPost
+	default:
+		return Event{}, false, fmt.Errorf("unsupported agent-v1 type %q", payload.Type)
+	}
+	if payload.AgentName == "" {
+		return Event{}, false, errors.New("agent_name is missing")
+	}
+	if kind == model.CheckpointKindEdit && len(payload.EditedFilepaths) == 0 {
+		return Event{}, false, errors.New("edited_filepaths is empty")
+	}
+	if kind != model.CheckpointKindEdit {
+		modelName := payload.Model
+		if modelName == "" {
+			modelName = FallbackModel
+		}
+		eventID := firstValue(
+			payload.ID, payload.EventID, payload.EventIDCamel,
+			payload.ToolUseID, payload.ToolUseIDCamel,
+			payload.ToolCallID, payload.ToolCallIDCamel,
+		)
+		event := Event{Kind: kind, Type: author, EventID: eventID}
+		if author == model.AuthorAI {
+			event.Agent = payload.AgentName
+			event.Model = modelName
+			event.Session = payload.ConversationID
+			if err := model.ValidateAttribution(model.Attribution{
+				Author: event.Type, Agent: event.Agent, Model: event.Model, Session: event.Session,
+			}); err != nil {
+				return Event{}, false, err
+			}
+		}
+		return event, true, nil
+	}
+	modelName := payload.Model
+	if modelName == "" {
+		modelName = FallbackModel
+	}
+	paths := uniquePaths(payload.EditedFilepaths)
+	if len(paths) == 0 {
+		return Event{}, false, errors.New("edited_filepaths contains no usable path")
+	}
+	event := Event{
+		Kind: kind,
+		Type: author,
+		EventID: firstValue(
+			payload.ID, payload.EventID, payload.EventIDCamel,
+			payload.ToolUseID, payload.ToolUseIDCamel,
+			payload.ToolCallID, payload.ToolCallIDCamel,
+		),
+		Paths: paths,
+	}
+	if author == model.AuthorAI {
+		event.Agent = payload.AgentName
+		event.Model = modelName
+		event.Session = payload.ConversationID
+		if err := model.ValidateAttribution(model.Attribution{
+			Author: event.Type, Agent: event.Agent, Model: event.Model, Session: event.Session,
+		}); err != nil {
+			return Event{}, false, err
+		}
+	}
+	return event, true, nil
+}
+
+func parsePortableHook(agent string, explicit model.Author, data []byte) (Event, bool, error) {
+	if explicit != model.AuthorHuman && explicit != model.AuthorAI {
+		return Event{}, false, errors.New("explicit type must be human or ai")
+	}
+	var payload struct {
+		SessionID            string          `json:"session_id"`
+		SessionIDCamel       string          `json:"sessionId"`
+		SessionIDUpper       string          `json:"sessionID"`
+		ConversationID       string          `json:"conversation_id"`
+		ConversationIDCamel  string          `json:"conversationId"`
+		TrajectoryID         string          `json:"trajectory_id"`
+		TrajectoryIDCamel    string          `json:"trajectoryId"`
+		ThreadID             string          `json:"thread_id"`
+		ThreadIDCamel        string          `json:"threadId"`
+		Model                string          `json:"model"`
+		ModelName            string          `json:"model_name"`
+		ModelNameCamel       string          `json:"modelName"`
+		TranscriptPath       string          `json:"transcript_path"`
+		HookEventName        string          `json:"hook_event_name"`
+		HookEventNameCamel   string          `json:"hookEventName"`
+		EventName            string          `json:"event_name"`
+		EventNameCamel       string          `json:"eventName"`
+		Event                string          `json:"event"`
+		AgentActionName      string          `json:"agent_action_name"`
+		AgentActionNameCamel string          `json:"agentActionName"`
+		ToolName             string          `json:"tool_name"`
+		ToolNameCamel        string          `json:"toolName"`
+		Tool                 string          `json:"tool"`
+		ID                   string          `json:"id"`
+		EventID              string          `json:"event_id"`
+		EventIDCamel         string          `json:"eventId"`
+		CallID               string          `json:"callID"`
+		ToolUseID            string          `json:"tool_use_id"`
+		ToolUseIDCamel       string          `json:"toolUseId"`
+		ToolCallID           string          `json:"tool_call_id"`
+		ToolCallIDCamel      string          `json:"toolCallId"`
+		ToolInput            json.RawMessage `json:"tool_input"`
+		ToolInfo             json.RawMessage `json:"tool_info"`
+		ToolInfoCamel        json.RawMessage `json:"toolInfo"`
+		Arguments            json.RawMessage `json:"arguments"`
+		ToolArgs             json.RawMessage `json:"toolArgs"`
+		Args                 json.RawMessage `json:"args"`
+		FilePath             string          `json:"file_path"`
+		FilePathCamel        string          `json:"filePath"`
+		File                 string          `json:"file"`
+		Path                 string          `json:"path"`
+		FilePaths            []string        `json:"file_paths"`
+		FilePathsCamel       []string        `json:"filePaths"`
+		EditedFilepaths      []string        `json:"edited_filepaths"`
+		EditedFilepathsCamel []string        `json:"editedFilepaths"`
+		Files                []string        `json:"files"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return Event{}, false, fmt.Errorf("decode %s hook input: %w", agent, err)
+	}
+	shell := isShellOperation(
+		payload.HookEventName,
+		payload.HookEventNameCamel,
+		payload.EventName,
+		payload.EventNameCamel,
+		payload.Event,
+		payload.AgentActionName,
+		payload.AgentActionNameCamel,
+		payload.ToolName,
+		payload.ToolNameCamel,
+		payload.Tool,
+	)
+	modelName := payload.Model
+	if modelName == "" {
+		modelName = firstValue(payload.ModelName, payload.ModelNameCamel, FallbackModel)
+	}
+	session := firstValue(
+		payload.SessionID,
+		payload.SessionIDCamel,
+		payload.SessionIDUpper,
+		payload.ConversationID,
+		payload.ConversationIDCamel,
+		payload.TrajectoryID,
+		payload.TrajectoryIDCamel,
+		payload.ThreadID,
+		payload.ThreadIDCamel,
+	)
+	eventID := firstValue(
+		payload.ID, payload.EventID, payload.EventIDCamel,
+		payload.CallID,
+		payload.ToolUseID, payload.ToolUseIDCamel,
+		payload.ToolCallID, payload.ToolCallIDCamel,
+	)
+	if shell {
+		return shellEvent(agent, explicit, modelName, session, eventID)
+	}
+	if readOnlyOperation(payload.HookEventName) ||
+		readOnlyOperation(payload.HookEventNameCamel) ||
+		readOnlyOperation(payload.EventName) ||
+		readOnlyOperation(payload.EventNameCamel) ||
+		readOnlyOperation(payload.Event) ||
+		readOnlyOperation(payload.AgentActionName) ||
+		readOnlyOperation(payload.AgentActionNameCamel) ||
+		readOnlyOperation(firstValue(payload.ToolName, payload.ToolNameCamel, payload.Tool)) {
+		return Event{}, false, nil
+	}
+	applyPatch := applyPatchTool(payload.ToolName, payload.ToolNameCamel, payload.Tool)
+	requirePatchBody := agent == "factory" && applyPatch
+	patchBodyFound := false
+	paths := []string{payload.FilePath, payload.FilePathCamel, payload.File, payload.Path}
+	paths = append(paths, payload.FilePaths...)
+	paths = append(paths, payload.FilePathsCamel...)
+	paths = append(paths, payload.EditedFilepaths...)
+	paths = append(paths, payload.EditedFilepathsCamel...)
+	paths = append(paths, payload.Files...)
+	for _, raw := range []json.RawMessage{
+		payload.ToolInput, payload.ToolInfo, payload.ToolInfoCamel,
+		payload.Arguments, payload.ToolArgs, payload.Args,
+	} {
+		if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(raw), []byte{'"'}) {
+			var encoded string
+			if err := json.Unmarshal(raw, &encoded); err != nil {
+				return Event{}, false, fmt.Errorf("decode hook argument string: %w", err)
+			}
+			raw = json.RawMessage(encoded)
+		}
+		var input struct {
+			FilePath             string   `json:"file_path"`
+			FilePathCamel        string   `json:"filePath"`
+			File                 string   `json:"file"`
+			Path                 string   `json:"path"`
+			Patch                string   `json:"patch"`
+			PatchText            string   `json:"patchText"`
+			Input                string   `json:"input"`
+			FilePaths            []string `json:"file_paths"`
+			FilePathsCamel       []string `json:"filePaths"`
+			EditedFilepaths      []string `json:"edited_filepaths"`
+			EditedFilepathsCamel []string `json:"editedFilepaths"`
+			Files                []string `json:"files"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return Event{}, false, fmt.Errorf("decode hook arguments: %w", err)
+		}
+		paths = append(paths, input.FilePath, input.FilePathCamel, input.File, input.Path)
+		paths = append(paths, input.FilePaths...)
+		paths = append(paths, input.FilePathsCamel...)
+		paths = append(paths, input.EditedFilepaths...)
+		paths = append(paths, input.EditedFilepathsCamel...)
+		paths = append(paths, input.Files...)
+		// Factory puts the ApplyPatch body in input and OpenCode puts it in
+		// patchText; patch covers other surfaces. Only ApplyPatch tools may use
+		// those fields as the patch body: ordinary tools can carry unrelated
+		// text in them that is not a patch.
+		patch := input.Patch
+		if applyPatch {
+			patch = firstValue(input.Patch, input.PatchText, input.Input)
+		}
+		if patch != "" {
+			patchBodyFound = true
+			patchFiles, err := patchPaths(patch)
+			if err != nil && (requirePatchBody || len(uniquePaths(paths)) == 0) {
+				return Event{}, false, err
+			}
+			if err == nil {
+				paths = append(paths, patchFiles...)
+			}
+		}
+	}
+	if requirePatchBody && !patchBodyFound {
+		return Event{}, false, errors.New("patch is missing")
+	}
+	paths = uniquePaths(paths)
+	if len(paths) == 0 {
+		if applyPatch {
+			return Event{}, false, errors.New("patch is missing")
+		}
+		return Event{}, false, nil
+	}
+	event := Event{Kind: model.CheckpointKindEdit, Type: explicit, Paths: paths, EventID: eventID, TranscriptPath: payload.TranscriptPath}
+	if explicit == model.AuthorAI {
+		event.Agent = agent
+		event.Model = modelName
+		event.Session = session
+		if err := model.ValidateAttribution(model.Attribution{
+			Author: event.Type, Agent: event.Agent, Model: event.Model, Session: event.Session,
+		}); err != nil {
+			return Event{}, false, err
+		}
+	}
+	return event, true, nil
+}
+
+func shellEvent(agent string, explicit model.Author, modelName, session, eventID string) (Event, bool, error) {
+	if explicit != model.AuthorHuman && explicit != model.AuthorAI {
+		return Event{}, false, errors.New("explicit type must be human or ai")
+	}
+	if err := model.ValidateEventID(eventID); err != nil {
+		return Event{}, false, err
+	}
+	event := Event{
+		Kind:    model.CheckpointKindShellPre,
+		Type:    explicit,
+		EventID: eventID,
+	}
+	if explicit == model.AuthorAI {
+		if modelName == "" {
+			modelName = FallbackModel
+		}
+		event.Kind = model.CheckpointKindShellPost
+		event.Agent = agent
+		event.Model = modelName
+		event.Session = session
+		if err := model.ValidateAttribution(model.Attribution{
+			Author: event.Type, Agent: event.Agent, Model: event.Model, Session: event.Session,
+		}); err != nil {
+			return Event{}, false, err
+		}
+	}
+	return event, true, nil
+}
+
+func isShellOperation(values ...string) bool {
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.ReplaceAll(value, "-", "_")
+		value = strings.ReplaceAll(value, " ", "_")
+		if value == "" {
+			continue
+		}
+		switch value {
+		case "bash", "shell", "terminal", "command", "run", "exec", "execute",
+			"run_command", "execute_command", "shell_command", "terminal_command",
+			"run_shell_command", "execute_shell_command", "pre_run_command",
+			"post_run_command", "pre_execute_command", "post_execute_command":
+			return true
+		}
+		if strings.Contains(value, "bash") || strings.Contains(value, "command") ||
+			strings.Contains(value, "shell") || strings.Contains(value, "terminal") {
+			return true
+		}
+	}
+	return false
+}
+
+// applyPatchTool reports whether a tool name refers to the ApplyPatch tool.
+// It accepts prefixed and separated spellings like factory.ApplyPatch and
+// apply_patch, mirroring how surfaces name the tool.
+func applyPatchTool(values ...string) bool {
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if index := strings.LastIndex(value, "."); index >= 0 {
+			value = value[index+1:]
+		}
+		value = strings.ReplaceAll(value, "_", "")
+		value = strings.ReplaceAll(value, "-", "")
+		value = strings.ReplaceAll(value, " ", "")
+		if value == "applypatch" {
+			return true
+		}
+	}
+	return false
+}
+
+func firstValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func readOnlyOperation(value string) bool {
+	value = strings.ToLower(value)
+	if value == "" {
+		return false
+	}
+	for _, edit := range []string{"write", "edit", "patch", "replace", "create", "delete", "move", "rename"} {
+		if strings.Contains(value, edit) {
+			return false
+		}
+	}
+	for _, read := range []string{"read", "view", "search", "find", "list", "run", "execute", "mcp"} {
+		if strings.Contains(value, read) {
+			return true
+		}
+	}
+	return false
+}
+
+func patchPaths(patch string) ([]string, error) {
+	if patch == "" {
+		return nil, errors.New("patch is missing")
+	}
+	var paths []string
+	for _, line := range strings.Split(patch, "\n") {
+		var path string
+		switch {
+		case strings.HasPrefix(line, "*** Add File: "):
+			path = strings.TrimPrefix(line, "*** Add File: ")
+		case strings.HasPrefix(line, "*** Update File: "):
+			path = strings.TrimPrefix(line, "*** Update File: ")
+		case strings.HasPrefix(line, "*** Delete File: "):
+			path = strings.TrimPrefix(line, "*** Delete File: ")
+		case strings.HasPrefix(line, "*** Move to: "):
+			path = strings.TrimPrefix(line, "*** Move to: ")
+		case strings.HasPrefix(line, "--- "):
+			path = unifiedDiffPath(strings.TrimPrefix(line, "--- "))
+		case strings.HasPrefix(line, "+++ "):
+			path = unifiedDiffPath(strings.TrimPrefix(line, "+++ "))
+		default:
+			continue
+		}
+		if path == "" {
+			continue
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return nil, errors.New("patch contains an empty file path")
+		}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return nil, errors.New("patch contains no supported file operation")
+	}
+	return uniquePaths(paths), nil
+}
+
+func unifiedDiffPath(value string) string {
+	value, _, _ = strings.Cut(value, "\t")
+	value = strings.TrimSpace(value)
+	if value == "/dev/null" {
+		return ""
+	}
+	if strings.HasPrefix(value, "a/") || strings.HasPrefix(value, "b/") {
+		value = value[2:]
+	}
+	return value
+}
+
+func uniquePaths(paths []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		path = filepath.Clean(path)
+		if path == "." {
+			continue
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		result = append(result, path)
+	}
+	return result
+}
+
+func readBounded(input io.Reader) ([]byte, error) {
+	if input == nil {
+		return nil, errors.New("hook input is nil")
+	}
+	data, err := io.ReadAll(io.LimitReader(input, MaxInputBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read hook input: %w", err)
+	}
+	if len(data) > MaxInputBytes {
+		return nil, fmt.Errorf("hook input exceeds %d bytes", MaxInputBytes)
+	}
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, errors.New("hook input is empty")
+	}
+	return data, nil
+}

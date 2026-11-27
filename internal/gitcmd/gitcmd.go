@@ -1,0 +1,1882 @@
+// Package gitcmd is the only production boundary for Git subprocesses.
+package gitcmd
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/amichne/attributed/internal/model"
+)
+
+const (
+	commandTimeout = 30 * time.Second
+	maxFileBytes   = 64 << 20
+	maxOutputBytes = maxFileBytes
+	// maxRecordBytes bounds one record of streamed Git output. Streamed
+	// commands print object IDs and short note paths.
+	maxRecordBytes     = 64 << 10
+	maxNoteBytes       = 16 << 20
+	attributedNotesRef = "refs/notes/attributed"
+	globalConfig       = "--global"
+	revParse           = "rev-parse"
+	catFile            = "cat-file"
+	absolutePaths      = "--path-format=absolute"
+	verify             = "--verify"
+	discoverOp         = "discover worktree"
+	readNoteOp         = "read attribution note"
+)
+
+// ErrOutputLimit reports Git output larger than the supported file bound.
+var ErrOutputLimit = errors.New("git output exceeds the supported limit")
+
+// ErrSnapshotBudget reports a snapshot that exceeds its remaining budget.
+var ErrSnapshotBudget = errors.New("snapshot byte budget exceeded")
+
+var errWorktreeFileLimit = errors.New("worktree file exceeds requested limit")
+
+// Repo describes one Git worktree.
+type Repo struct {
+	Root      string
+	GitDir    string
+	CommonDir string
+	gitBin    string
+	batch     *batchScope
+	trees     map[string]map[string]treeEntry
+	idLength  int
+}
+
+// Change describes one path changed by a commit.
+type Change struct {
+	Status  byte
+	OldPath string
+	Path    string
+}
+
+// CommandError reports a failed Git operation without environment or content.
+type CommandError struct {
+	Operation string
+	ExitCode  int
+	Stderr    string
+	Err       error
+}
+
+// IsNotRepository reports the ordinary rev-parse error outside a worktree.
+func IsNotRepository(err error) bool {
+	var commandErr *CommandError
+	return errors.As(err, &commandErr) &&
+		commandErr.Operation == discoverOp &&
+		commandErr.ExitCode == 128 &&
+		strings.Contains(strings.ToLower(commandErr.Stderr), "not a git repository")
+}
+
+func (err *CommandError) Error() string {
+	if err.Stderr == "" {
+		return fmt.Sprintf("git %s failed with exit code %d", err.Operation, err.ExitCode)
+	}
+	return fmt.Sprintf("git %s failed with exit code %d: %s", err.Operation, err.ExitCode, err.Stderr)
+}
+
+func (err *CommandError) Unwrap() error {
+	return err.Err
+}
+
+// Discover finds the worktree containing dir.
+func Discover(dir string) (*Repo, error) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return nil, fmt.Errorf("find git executable: %w", err)
+	}
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve working directory: %w", err)
+	}
+	temp := &Repo{Root: absolute, gitBin: gitBin}
+	root, gitDir, commonDir, err := temp.discoverDirectories()
+	if err != nil {
+		return nil, err
+	}
+	return &Repo{
+		Root:      filepath.Clean(root),
+		GitDir:    filepath.Clean(gitDir),
+		CommonDir: filepath.Clean(commonDir),
+		gitBin:    gitBin,
+	}, nil
+}
+
+// discoverDirectories reads the worktree, Git, and common directories with
+// one rev-parse, because every hook run starts with discovery. A path with a
+// line break makes the combined output ambiguous, so any output that is not
+// exactly three lines falls back to one rev-parse per directory.
+func (repo *Repo) discoverDirectories() (string, string, string, error) {
+	out, err := repo.run(discoverOp, nil,
+		revParse, "--show-toplevel", absolutePaths, "--git-dir", "--git-common-dir")
+	if err != nil {
+		return "", "", "", err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) == 3 && lines[0] != "" && lines[1] != "" && lines[2] != "" {
+		return lines[0], lines[1], lines[2], nil
+	}
+	root, err := repo.text(discoverOp, nil, revParse, "--show-toplevel")
+	if err != nil {
+		return "", "", "", err
+	}
+	gitDir, err := repo.text("discover git directory", nil, revParse, absolutePaths, "--git-dir")
+	if err != nil {
+		return "", "", "", err
+	}
+	commonDir, err := repo.text("discover common git directory", nil, revParse, absolutePaths, "--git-common-dir")
+	if err != nil {
+		return "", "", "", err
+	}
+	return root, gitDir, commonDir, nil
+}
+
+// Head returns HEAD or an empty value for an unborn repository.
+func (repo *Repo) Head() (string, error) {
+	out, err := repo.run("read HEAD", nil, revParse, verify, "HEAD")
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 128 {
+			return "", nil
+		}
+		return "", err
+	}
+	value := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(value) {
+		return "", fmt.Errorf("read HEAD: invalid object ID %q", value)
+	}
+	return value, nil
+}
+
+// ObjectIDLength returns the repository storage object ID length.
+// The format of a repository never changes, so the answer is cached.
+func (repo *Repo) ObjectIDLength() (int, error) {
+	if repo.idLength != 0 {
+		return repo.idLength, nil
+	}
+	out, err := repo.run("read object format", nil, revParse, "--show-object-format=storage")
+	if err != nil {
+		return 0, err
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "sha1":
+		repo.idLength = 40
+	case "sha256":
+		repo.idLength = 64
+	default:
+		return 0, errors.New("git returned an unsupported object format")
+	}
+	return repo.idLength, nil
+}
+
+// PreviousHead returns the previous HEAD value from the current reflog entry.
+func (repo *Repo) PreviousHead() (string, bool, error) {
+	out, err := repo.run("read previous HEAD", nil, revParse, verify, "HEAD@{1}")
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 128 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	value := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(value) {
+		return "", false, errors.New("git returned invalid previous HEAD object ID")
+	}
+	return value, true, nil
+}
+
+// CurrentBranchRef returns the attached branch ref, if HEAD is attached.
+func (repo *Repo) CurrentBranchRef() (string, bool, error) {
+	out, err := repo.run("read current branch", nil, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	value := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(value, "refs/heads/") {
+		return "", false, errors.New("git returned an invalid current branch ref")
+	}
+	return value, true, nil
+}
+
+// Parent returns the first parent of commit, or empty for a root commit.
+func (repo *Repo) Parent(commit string) (string, error) {
+	parents, err := repo.Parents(commit)
+	if err != nil {
+		return "", err
+	}
+	if len(parents) == 0 {
+		return "", nil
+	}
+	return parents[0], nil
+}
+
+// Parents returns all commit parents in Git order.
+func (repo *Repo) Parents(commit string) ([]string, error) {
+	if !model.ValidObjectID(commit) {
+		return nil, errors.New("invalid commit object ID")
+	}
+	out, err := repo.run("read commit parents", nil, "rev-list", "--parents", "-n", "1", commit)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 || fields[0] != commit {
+		return nil, errors.New("git returned invalid commit parent data")
+	}
+	parents := make([]string, 0, len(fields)-1)
+	for _, value := range fields[1:] {
+		if !model.ValidObjectID(value) {
+			return nil, errors.New("git returned invalid parent object ID")
+		}
+		parents = append(parents, value)
+	}
+	return parents, nil
+}
+
+// HeadReflogAction returns the action that created HEAD, such as "commit",
+// "rebase (pick)", or "cherry-pick", and whether that entry is a merge or
+// pull fast-forward. It distinguishes sequencer replays and fast-forwards
+// from user-created commits. A bare ref update without a message, such as
+// git update-ref, yields an empty action rather than a guess.
+func (repo *Repo) HeadReflogAction() (string, bool, error) {
+	out, err := repo.run("read HEAD reflog action", nil, "log", "-g", "-1", "--pretty=%gs", "HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	subject := strings.TrimSpace(string(out))
+	if subject == "" {
+		return "", false, nil
+	}
+	action, _, _ := strings.Cut(subject, ":")
+	action = strings.TrimSpace(action)
+	// git merge, and git pull through it, logs "<action>: Fast-forward" when
+	// the branch only moves to existing commits. Checking the action keeps
+	// a commit whose subject ends the same way from matching.
+	fastForward := (strings.HasPrefix(action, "merge") || strings.HasPrefix(action, "pull")) &&
+		(strings.HasSuffix(subject, ": Fast-forward") ||
+			strings.HasSuffix(subject, ": Fast-forward (no commit created; -m option ignored)"))
+	return action, fastForward, nil
+}
+
+// Changes returns changed paths for commit relative to its first parent.
+func (repo *Repo) Changes(commit, parent string) ([]Change, error) {
+	if !model.ValidObjectID(commit) {
+		return nil, errors.New("invalid commit object ID")
+	}
+	args := []string{
+		"diff-tree",
+		"--no-commit-id",
+		"--name-status",
+		"-z",
+		"-r",
+		"-M",
+		"--no-ext-diff",
+		"--no-textconv",
+	}
+	if parent == "" {
+		args = append(args, "--root", commit)
+	} else {
+		if !model.ValidObjectID(parent) {
+			return nil, errors.New("invalid parent object ID")
+		}
+		args = append(args, parent, commit)
+	}
+	out, err := repo.run("list changed paths", nil, args...)
+	if err != nil {
+		return nil, err
+	}
+	fields := splitNUL(out)
+	var changes []Change
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		i++
+		if status == "" {
+			continue
+		}
+		kind := status[0]
+		if kind == 'R' || kind == 'C' {
+			if i+1 >= len(fields) {
+				return nil, errors.New("git returned truncated rename data")
+			}
+			oldPath, err := NormalizePath(fields[i])
+			if err != nil {
+				return nil, fmt.Errorf("normalize old path: %w", err)
+			}
+			path, err := NormalizePath(fields[i+1])
+			if err != nil {
+				return nil, fmt.Errorf("normalize path: %w", err)
+			}
+			changes = append(changes, Change{Status: kind, OldPath: oldPath, Path: path})
+			i += 2
+			continue
+		}
+		if i >= len(fields) {
+			return nil, errors.New("git returned truncated path data")
+		}
+		path, err := NormalizePath(fields[i])
+		if err != nil {
+			return nil, fmt.Errorf("normalize path: %w", err)
+		}
+		changes = append(changes, Change{Status: kind, Path: path})
+		i++
+	}
+	return changes, nil
+}
+
+// RevList returns first-parent commits in the requested range, newest first.
+func (repo *Repo) RevList(from, to string, limit int) ([]string, error) {
+	if limit < 0 {
+		return nil, errors.New("commit limit cannot be negative")
+	}
+	if from != "" {
+		if err := validateRevision(from, "from revision"); err != nil {
+			return nil, err
+		}
+	}
+	if to != "" {
+		if err := validateRevision(to, "to revision"); err != nil {
+			return nil, err
+		}
+	}
+	revision := to
+	switch {
+	case from != "" && to != "":
+		revision = from + ".." + to
+	case from != "":
+		revision = from + "..HEAD"
+	case to == "":
+		revision = "HEAD"
+	}
+	args := []string{"rev-list", "--first-parent"}
+	if limit > 0 {
+		args = append(args, "--max-count="+strconv.Itoa(limit))
+	}
+	args = append(args, revision)
+	out, err := repo.run("list commits", nil, args...)
+	if err != nil {
+		return nil, err
+	}
+	var commits []string
+	for _, value := range strings.Fields(string(out)) {
+		if !model.ValidObjectID(value) {
+			return nil, errors.New("git returned invalid commit object ID")
+		}
+		commits = append(commits, value)
+	}
+	return commits, nil
+}
+
+// PatchID returns the stable patch identifier for one commit.
+func (repo *Repo) PatchID(commit string) (string, error) {
+	if err := validateRevision(commit, "commit revision"); err != nil {
+		return "", err
+	}
+	diff, err := repo.run(
+		"read commit patch",
+		nil,
+		"diff-tree",
+		"-p",
+		"--root",
+		"--no-commit-id",
+		"--no-ext-diff",
+		"--no-textconv",
+		commit,
+	)
+	if err != nil {
+		return "", err
+	}
+	if len(bytes.TrimSpace(diff)) == 0 {
+		return "", nil
+	}
+	patchID, err := repo.run("calculate patch ID", bytes.NewReader(diff), "patch-id", "--stable")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(patchID))
+	if len(fields) == 0 || !model.ValidObjectID(fields[0]) {
+		return "", errors.New("git returned invalid patch ID")
+	}
+	return fields[0], nil
+}
+
+// WorktreeMatchesRevision reports whether one worktree path matches a tree.
+func (repo *Repo) WorktreeMatchesRevision(revision, path string) (bool, error) {
+	if err := validateRevision(revision, "revision"); err != nil {
+		return false, err
+	}
+	path, err := NormalizePath(path)
+	if err != nil {
+		return false, err
+	}
+	revisionBlob, revisionExists, err := repo.BlobID(revision, path)
+	if err != nil {
+		return false, err
+	}
+	content, worktreeExists, _, err := repo.WorktreeFile(path)
+	if err != nil {
+		return false, err
+	}
+	if !revisionExists || !worktreeExists {
+		return revisionExists == worktreeExists, nil
+	}
+	revisionContent, err := repo.ReadBlob(revisionBlob)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(revisionContent, content), nil
+}
+
+// StashPaths returns paths changed by a stash commit against its first parent.
+func (repo *Repo) StashPaths(stash string) ([]string, error) {
+	parent, err := repo.Parent(stash)
+	if err != nil {
+		return nil, err
+	}
+	changes, err := repo.Changes(stash, parent)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(changes)*2)
+	var paths []string
+	for _, change := range changes {
+		for _, path := range []string{change.OldPath, change.Path} {
+			if path != "" && !seen[path] {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// StashApplied reports whether all stash paths now match the stash tree.
+func (repo *Repo) StashApplied(stash string, paths []string) (bool, error) {
+	if len(paths) == 0 {
+		return false, nil
+	}
+	for _, path := range paths {
+		matches, err := repo.WorktreeMatchesRevision(stash, path)
+		if err != nil {
+			return false, err
+		}
+		if !matches {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// DirtyPaths returns normalized paths reported by Git as dirty.
+func (repo *Repo) DirtyPaths() ([]string, error) {
+	out, err := repo.run("list dirty paths", nil, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "-uall")
+	if err != nil {
+		return nil, err
+	}
+	entries := splitNUL(out)
+	seen := map[string]bool{}
+	var paths []string
+	for index := 0; index < len(entries); index++ {
+		entry := entries[index]
+		if len(entry) < 3 || entry[2] != ' ' {
+			return nil, errors.New("git returned invalid dirty path status")
+		}
+		status := entry[:2]
+		path, err := NormalizePath(entry[3:])
+		if err != nil {
+			return nil, fmt.Errorf("normalize dirty path: %w", err)
+		}
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+		if strings.ContainsRune(status, 'R') || strings.ContainsRune(status, 'C') {
+			index++
+			if index >= len(entries) {
+				return nil, errors.New("git returned truncated dirty rename data")
+			}
+			renamed, err := NormalizePath(entries[index])
+			if err != nil {
+				return nil, fmt.Errorf("normalize dirty rename path: %w", err)
+			}
+			if !seen[renamed] {
+				seen[renamed] = true
+				paths = append(paths, renamed)
+			}
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// CommitTime returns the committer timestamp in RFC3339 format.
+func (repo *Repo) CommitTime(commit string) (string, error) {
+	if err := validateRevision(commit, "commit revision"); err != nil {
+		return "", err
+	}
+	out, err := repo.run("read commit time", nil, "show", "-s", "--format=%cI", commit)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		return "", errors.New("git returned an empty commit timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		if _, nanoErr := time.Parse(time.RFC3339Nano, value); nanoErr != nil {
+			return "", errors.New("git returned an invalid commit timestamp")
+		}
+	}
+	return value, nil
+}
+
+// CommitAuthor returns the author name and email address of one commit.
+func (repo *Repo) CommitAuthor(commit string) (string, string, error) {
+	if err := validateRevision(commit, "commit revision"); err != nil {
+		return "", "", err
+	}
+	out, err := repo.run("read commit author", nil, "show", "-s", "--format=%an%x00%ae", commit)
+	if err != nil {
+		return "", "", err
+	}
+	fields := strings.SplitN(strings.TrimRight(string(out), "\n"), "\x00", 2)
+	if len(fields) != 2 {
+		return "", "", errors.New("git returned an invalid commit author")
+	}
+	return fields[0], fields[1], nil
+}
+
+// CommitMessage returns the full commit message for one commit.
+func (repo *Repo) CommitMessage(commit string) (string, error) {
+	if err := validateRevision(commit, "commit revision"); err != nil {
+		return "", err
+	}
+	out, err := repo.run("read commit message", nil, "show", "-s", "--format=%B", commit)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// MergeBase returns the best common ancestor of two revisions.
+func (repo *Repo) MergeBase(a, b string) (string, error) {
+	if err := validateRevision(a, "first revision"); err != nil {
+		return "", err
+	}
+	if err := validateRevision(b, "second revision"); err != nil {
+		return "", err
+	}
+	out, err := repo.run("read merge base", nil, "merge-base", a, b)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(value) {
+		return "", errors.New("git returned invalid merge base object ID")
+	}
+	return value, nil
+}
+
+// AnyBranchContains reports whether a local or remote-tracking branch can
+// still reach commit. A base commit whose object is gone counts as
+// uncontained because nothing can ever reach it again. An object that exists
+// but cannot be read reports the failure instead, so callers never treat a
+// damaged object database as proof of unreachability.
+func (repo *Repo) AnyBranchContains(commit string) (bool, error) {
+	return repo.NewBranchScanner().AnyBranchContains(commit)
+}
+
+// BranchScanner shares expensive object database verification across one
+// bounded reachability scan.
+type BranchScanner struct {
+	repo       *Repo
+	verify     func() error
+	verifyOnce sync.Once
+	verifyErr  error
+}
+
+// NewBranchScanner starts one bounded branch reachability scan.
+func (repo *Repo) NewBranchScanner() *BranchScanner {
+	return repo.newBranchScanner(repo.verifyObjectDatabase)
+}
+
+func (repo *Repo) newBranchScanner(verify func() error) *BranchScanner {
+	return &BranchScanner{
+		repo:   repo,
+		verify: verify,
+	}
+}
+
+// AnyBranchContains reports whether a local or remote-tracking branch can
+// still reach commit.
+func (scanner *BranchScanner) AnyBranchContains(commit string) (bool, error) {
+	branches, _, err := scanner.BranchesContaining(commit)
+	if err != nil {
+		return false, err
+	}
+	return len(branches) > 0, nil
+}
+
+// BranchesContaining returns local and remote-tracking branches that can
+// reach commit, plus whether the commit object exists.
+func (repo *Repo) BranchesContaining(commit string) ([]string, bool, error) {
+	return repo.NewBranchScanner().BranchesContaining(commit)
+}
+
+// BranchesContaining returns branches that can reach commit within this scan.
+func (scanner *BranchScanner) BranchesContaining(commit string) ([]string, bool, error) {
+	if err := validateRevision(commit, "revision"); err != nil {
+		return nil, false, err
+	}
+	out, stderr, err := scanner.repo.runWithStderr("check branch containment", nil, "for-each-ref",
+		"refs/heads", "refs/remotes", "--contains="+commit, "--format=%(refname)")
+	if err != nil {
+		exists, existsErr := scanner.commitExistsQuiet(commit)
+		if existsErr != nil {
+			return nil, false, existsErr
+		}
+		if !exists {
+			return nil, false, nil
+		}
+		return nil, true, err
+	}
+	if stderr != "" {
+		return nil, true, fmt.Errorf("git check branch containment reported: %s", stderr)
+	}
+	var branches []string
+	for _, branch := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if branch == "" {
+			continue
+		}
+		if err := validateRefName(branch); err != nil {
+			return nil, true, errors.New("git returned an invalid branch reference")
+		}
+		branches = append(branches, branch)
+	}
+	sort.Strings(branches)
+	return branches, true, nil
+}
+
+// commitExistsQuiet reports whether commit resolves to an existing commit
+// object. A cleanly missing object reports false without an error, while an
+// object that exists but cannot be read reports the failure. Git exits 1 with
+// empty stderr for both cases, so fsck confirms a healthy object database
+// before the missing one is accepted.
+func (scanner *BranchScanner) commitExistsQuiet(commit string) (bool, error) {
+	if err := validateRevision(commit, "revision"); err != nil {
+		return false, err
+	}
+	_, err := scanner.repo.run("check commit exists", nil,
+		revParse, verify, "--quiet", commit+"^{commit}")
+	if err == nil {
+		return true, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 &&
+		strings.TrimSpace(commandErr.Stderr) == "" {
+		if err := scanner.verifyObjectDatabase(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return false, err
+}
+
+func (scanner *BranchScanner) verifyObjectDatabase() error {
+	scanner.verifyOnce.Do(func() {
+		scanner.verifyErr = scanner.verify()
+	})
+	return scanner.verifyErr
+}
+
+func (repo *Repo) verifyObjectDatabase() error {
+	if _, err := repo.run(
+		"check object database",
+		nil,
+		"fsck",
+		"--full",
+		"--no-reflogs",
+		"--no-dangling",
+	); err != nil {
+		return fmt.Errorf("verify object database: %w", err)
+	}
+	return nil
+}
+
+// NoteCommits returns commits carrying notes in ref.
+func (repo *Repo) NoteCommits(ref string) ([]string, error) {
+	if err := validateNoteRef(ref); err != nil {
+		return nil, err
+	}
+	out, err := repo.run("list attribution note commits", nil, "notes", "--ref="+ref, "list")
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields)%2 != 0 {
+		return nil, errors.New("git returned invalid note list")
+	}
+	commits := make([]string, 0, len(fields)/2)
+	seen := map[string]bool{}
+	for index := 0; index < len(fields); index += 2 {
+		if !model.ValidObjectID(fields[index]) || !model.ValidObjectID(fields[index+1]) {
+			return nil, errors.New("git returned invalid note object ID")
+		}
+		if !seen[fields[index+1]] {
+			seen[fields[index+1]] = true
+			commits = append(commits, fields[index+1])
+		}
+	}
+	sort.Strings(commits)
+	return commits, nil
+}
+
+// BlobID returns the blob object for path at revision.
+func (repo *Repo) BlobID(revision, path string) (string, bool, error) {
+	if !model.ValidObjectID(revision) {
+		return "", false, errors.New("invalid revision object ID")
+	}
+	path, err := NormalizePath(path)
+	if err != nil {
+		return "", false, err
+	}
+	if entry, ok := repo.trees[revision][path]; ok {
+		return entry.blob, entry.exists, nil
+	}
+	out, err := repo.run("read tree entry", nil, "ls-tree", "-z", revision, "--", path)
+	if err != nil {
+		return "", false, err
+	}
+	if len(out) == 0 {
+		return "", false, nil
+	}
+	line := strings.TrimSuffix(string(out), "\x00")
+	meta, returnedPath, ok := strings.Cut(line, "\t")
+	if !ok || returnedPath != path {
+		return "", false, errors.New("git returned invalid tree entry")
+	}
+	fields := strings.Fields(meta)
+	if len(fields) != 3 || fields[1] != "blob" || !model.ValidObjectID(fields[2]) {
+		return "", false, errors.New("git returned non-blob tree entry")
+	}
+	return fields[2], true, nil
+}
+
+// ReadBlob reads a bounded blob.
+func (repo *Repo) ReadBlob(oid string) ([]byte, error) {
+	if !model.ValidObjectID(oid) {
+		return nil, errors.New("invalid blob object ID")
+	}
+	if data, batched, err := repo.readBatched("read blob", oid, maxOutputBytes); batched {
+		return data, err
+	}
+	out, err := repo.run("read blob", nil, catFile, "blob", oid)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BlobSize returns the size of one validated blob without reading its content.
+func (repo *Repo) BlobSize(oid string) (int64, error) {
+	if !model.ValidObjectID(oid) {
+		return 0, errors.New("invalid blob object ID")
+	}
+	out, err := repo.run("read blob size", nil, catFile, "-s", oid)
+	if err != nil {
+		return 0, err
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil || size < 0 {
+		return 0, errors.New("git returned invalid blob size")
+	}
+	return size, nil
+}
+
+// HashBytes writes content to the Git object database.
+func (repo *Repo) HashBytes(content []byte) (string, error) {
+	out, err := repo.run("write blob", bytes.NewReader(content), "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", err
+	}
+	oid := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(oid) {
+		return "", errors.New("git returned invalid blob object ID")
+	}
+	return oid, nil
+}
+
+// WorktreeFile safely reads a regular, non-ignored file inside the worktree.
+func (repo *Repo) WorktreeFile(path string) ([]byte, bool, string, error) {
+	return repo.worktreeFile(path, maxFileBytes)
+}
+
+func (repo *Repo) worktreeFile(path string, limit int64) ([]byte, bool, string, error) {
+	if limit <= 0 {
+		return nil, false, "", fmt.Errorf("%w: path %q exceeds %d bytes", errWorktreeFileLimit, path, limit)
+	}
+	path, err := repo.NormalizeWorktreePath(path)
+	if err != nil {
+		return nil, false, "", err
+	}
+	ignored, err := repo.Ignored(path)
+	if err != nil {
+		return nil, false, "", err
+	}
+	if ignored {
+		return nil, false, "", fmt.Errorf("path %q is ignored by Git", path)
+	}
+	full := filepath.Join(repo.Root, filepath.FromSlash(path))
+	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, path, nil
+	}
+	if err != nil {
+		return nil, false, "", fmt.Errorf("stat path %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, "", fmt.Errorf("path %q is not a regular file", path)
+	}
+	resolved, err := filepath.EvalSymlinks(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, path, nil
+	}
+	if err != nil {
+		return nil, false, "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	if !inside(repo.Root, resolved) {
+		return nil, false, "", fmt.Errorf("path %q escapes the worktree", path)
+	}
+	if info.Size() > limit {
+		return nil, false, "", fmt.Errorf("%w: path %q exceeds %d bytes", errWorktreeFileLimit, path, limit)
+	}
+	file, err := os.Open(full)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("open path %q: %w", path, err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, false, "", fmt.Errorf("stat opened path %q: %w", path, err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, false, "", fmt.Errorf("path %q changed while opening", path)
+	}
+	if openedInfo.Size() > limit {
+		return nil, false, "", fmt.Errorf("%w: path %q exceeds %d bytes", errWorktreeFileLimit, path, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, false, "", fmt.Errorf("read path %q: %w", path, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, false, "", fmt.Errorf("%w: path %q exceeds %d bytes", errWorktreeFileLimit, path, limit)
+	}
+	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
+		return nil, false, "", fmt.Errorf("path %q is binary or invalid UTF-8", path)
+	}
+	lineCount := bytes.Count(data, []byte{'\n'})
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		lineCount++
+	}
+	if lineCount > model.MaxTextLines {
+		return nil, false, "", fmt.Errorf("path %q exceeds %d lines", path, model.MaxTextLines)
+	}
+	return data, true, path, nil
+}
+
+// NormalizeWorktreePath accepts an absolute or relative path inside the worktree.
+func (repo *Repo) NormalizeWorktreePath(path string) (string, error) {
+	if path == "" || strings.ContainsRune(path, 0) {
+		return "", errors.New("path is empty or contains NUL")
+	}
+	native := filepath.FromSlash(path)
+	if filepath.IsAbs(native) {
+		resolved, err := resolvePathAliases(filepath.Clean(native))
+		if err != nil {
+			return "", fmt.Errorf("resolve absolute path: %w", err)
+		}
+		relative, err := filepath.Rel(repo.Root, resolved)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return "", errors.New("absolute path escapes the worktree")
+		}
+		path = filepath.ToSlash(relative)
+	}
+	return NormalizePath(path)
+}
+
+func resolvePathAliases(path string) (string, error) {
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if _, statErr := os.Lstat(path); statErr == nil {
+			return "", err
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		suffix = append(suffix, filepath.Base(path))
+		path = parent
+	}
+}
+
+// CwdRelative rewrites a repository-relative path against the current
+// working directory, mirroring how Git resolves blame and log pathspec
+// arguments. It reports false when the path is absolute, the working
+// directory is the repository root, or the working directory lies outside
+// the worktree.
+func (repo *Repo) CwdRelative(path string) (string, bool, error) {
+	native := filepath.FromSlash(path)
+	if native == "" || filepath.IsAbs(native) {
+		return "", false, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false, fmt.Errorf("read working directory: %w", err)
+	}
+	cwd, err = filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve working directory: %w", err)
+	}
+	if !inside(repo.Root, cwd) {
+		return "", false, nil
+	}
+	relative, err := filepath.Rel(repo.Root, cwd)
+	if err != nil {
+		return "", false, nil
+	}
+	if relative == "." {
+		return "", false, nil
+	}
+	joined := filepath.ToSlash(filepath.Join(relative, native))
+	joined, err = NormalizePath(joined)
+	if err != nil {
+		return "", false, nil
+	}
+	return joined, true, nil
+}
+
+// SnapshotWorktree hashes one allowed worktree path.
+func (repo *Repo) SnapshotWorktree(path string) (model.Snapshot, error) {
+	content, exists, normalized, err := repo.WorktreeFile(path)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	if !exists {
+		return model.Snapshot{Path: normalized, Exists: false}, nil
+	}
+	oid, err := repo.HashBytes(content)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	return model.Snapshot{Path: normalized, Exists: true, Blob: oid}, nil
+}
+
+// SnapshotWorktreeWithLimit hashes one allowed worktree path within maxBytes.
+func (repo *Repo) SnapshotWorktreeWithLimit(path string, maxBytes int64) (model.Snapshot, int64, error) {
+	if maxBytes <= 0 {
+		return model.Snapshot{}, 0, ErrSnapshotBudget
+	}
+	content, exists, normalized, err := repo.worktreeFile(path, maxBytes)
+	if err != nil {
+		if errors.Is(err, errWorktreeFileLimit) {
+			return model.Snapshot{}, 0, ErrSnapshotBudget
+		}
+		return model.Snapshot{}, 0, err
+	}
+	if !exists {
+		return model.Snapshot{Path: normalized, Exists: false}, 0, nil
+	}
+	oid, err := repo.HashBytes(content)
+	if err != nil {
+		return model.Snapshot{}, 0, err
+	}
+	return model.Snapshot{Path: normalized, Exists: true, Blob: oid}, int64(len(content)), nil
+}
+
+// SnapshotWorktreeStored works like SnapshotWorktreeWithLimit but does not
+// write content whose blob ID is already in stored. Shell checkpoints see the
+// same dirty files on every agent command, and each write is a Git process.
+func (repo *Repo) SnapshotWorktreeStored(
+	path string,
+	maxBytes int64,
+	stored map[string]bool,
+) (model.Snapshot, int64, error) {
+	if maxBytes <= 0 {
+		return model.Snapshot{}, 0, ErrSnapshotBudget
+	}
+	content, exists, normalized, err := repo.worktreeFile(path, maxBytes)
+	if err != nil {
+		if errors.Is(err, errWorktreeFileLimit) {
+			return model.Snapshot{}, 0, ErrSnapshotBudget
+		}
+		return model.Snapshot{}, 0, err
+	}
+	if !exists {
+		return model.Snapshot{Path: normalized, Exists: false}, 0, nil
+	}
+	oid, err := repo.HashContent(content)
+	if err != nil || !stored[oid] {
+		oid, err = repo.HashBytes(content)
+		if err != nil {
+			return model.Snapshot{}, 0, err
+		}
+	}
+	return model.Snapshot{Path: normalized, Exists: true, Blob: oid}, int64(len(content)), nil
+}
+
+// Ignored reports whether path is ignored by Git.
+func (repo *Repo) Ignored(path string) (bool, error) {
+	if repo.batch != nil {
+		if ignored, ok := repo.batch.ignored[path]; ok {
+			return ignored, nil
+		}
+	}
+	out, err := repo.run("check ignored path", nil, "check-ignore", "-q", "--", path)
+	if err == nil {
+		return true, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+		return false, nil
+	}
+	_ = out
+	return false, err
+}
+
+// NormalizePath validates and normalizes a repository-relative slash path.
+func NormalizePath(path string) (string, error) {
+	if path == "" || strings.ContainsRune(path, 0) {
+		return "", errors.New("path is empty or contains NUL")
+	}
+	for _, char := range path {
+		if unicode.IsControl(char) {
+			return "", errors.New("path contains a control character")
+		}
+	}
+	path = filepath.ToSlash(path)
+	if filepath.IsAbs(filepath.FromSlash(path)) || strings.HasPrefix(path, "/") {
+		return "", errors.New("absolute path is not allowed")
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", errors.New("path escapes the worktree")
+	}
+	for _, component := range strings.Split(clean, "/") {
+		if strings.EqualFold(component, ".git") {
+			return "", errors.New("Git administrative paths are not allowed")
+		}
+	}
+	return clean, nil
+}
+
+func inside(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// ReadNoteRef reads a note for commit from ref.
+func (repo *Repo) ReadNoteRef(ref, commit string) ([]byte, bool, error) {
+	if err := validateNoteRef(ref); err != nil {
+		return nil, false, err
+	}
+	if !model.ValidObjectID(commit) {
+		return nil, false, errors.New("invalid commit object ID")
+	}
+	out, err := repo.runLimited(
+		readNoteOp,
+		maxNoteBytes,
+		nil,
+		"notes",
+		"--ref="+ref,
+		"show",
+		commit,
+	)
+	if err == nil {
+		return out, true, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
+// ReadNoteBlob reads a note blob that ListNotes returned, with the same
+// size limit as ReadNote.
+func (repo *Repo) ReadNoteBlob(oid string) ([]byte, error) {
+	if !model.ValidObjectID(oid) {
+		return nil, errors.New("invalid note blob object ID")
+	}
+	if data, batched, err := repo.readBatched(readNoteOp, oid, maxNoteBytes); batched {
+		return data, err
+	}
+	return repo.runLimited(readNoteOp, maxNoteBytes, nil, catFile, "blob", oid)
+}
+
+// ReadNote reads a note for commit from the attribution ref.
+func (repo *Repo) ReadNote(commit string) ([]byte, bool, error) {
+	return repo.ReadNoteRef(attributedNotesRef, commit)
+}
+
+// WriteNoteRef creates a note or accepts an existing byte-identical note.
+func (repo *Repo) WriteNoteRef(ref, commit string, data []byte) error {
+	if err := validateNoteRef(ref); err != nil {
+		return err
+	}
+	if !model.ValidObjectID(commit) {
+		return errors.New("invalid commit object ID")
+	}
+	existing, ok, err := repo.ReadNoteRef(ref, commit)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if bytes.Equal(existing, data) || bytes.Equal(bytes.TrimSuffix(existing, []byte{'\n'}), bytes.TrimSuffix(data, []byte{'\n'})) {
+			return nil
+		}
+		return errors.New("commit already has a different attribution note")
+	}
+	return repo.writeNoteData(ref, commit, data, false)
+}
+
+// ReplaceNoteRefIfEqual replaces a note only when its bytes still match.
+func (repo *Repo) ReplaceNoteRefIfEqual(ref, commit string, expected, replacement []byte) (bool, error) {
+	if err := validateNoteRef(ref); err != nil {
+		return false, err
+	}
+	if !model.ValidObjectID(commit) {
+		return false, errors.New("invalid commit object ID")
+	}
+	actual, found, err := repo.ReadNoteRef(ref, commit)
+	if err != nil {
+		return false, err
+	}
+	if !found || !bytes.Equal(actual, expected) {
+		return false, nil
+	}
+	if err := repo.writeNoteData(ref, commit, replacement, true); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (repo *Repo) writeNoteData(ref, commit string, data []byte, force bool) error {
+	path, err := tempFile(repo.GitDir, "attributed-note-", data)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	args := []string{"notes", "--ref=" + ref, "add"}
+	if force {
+		args = append(args, "-f")
+	}
+	args = append(args, "-F", path, commit)
+	_, err = repo.run("write attribution note", nil, args...)
+	return noteWriteError(err)
+}
+
+// WriteNote creates a note or accepts an existing byte-identical note.
+func (repo *Repo) WriteNote(commit string, data []byte) error {
+	return repo.WriteNoteRef(attributedNotesRef, commit, data)
+}
+
+// DeleteNoteRef removes a note when it exists.
+func (repo *Repo) DeleteNoteRef(ref, commit string) error {
+	if err := validateNoteRef(ref); err != nil {
+		return err
+	}
+	if !model.ValidObjectID(commit) {
+		return errors.New("invalid commit object ID")
+	}
+	_, err := repo.run("remove attribution note", nil, "notes", "--ref="+ref, "remove", commit)
+	if err == nil {
+		return nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+		return nil
+	}
+	return err
+}
+
+// DeleteNoteRefIfEqual removes a note only when its bytes still match.
+func (repo *Repo) DeleteNoteRefIfEqual(ref, commit string, expected []byte) (bool, error) {
+	actual, found, err := repo.ReadNoteRef(ref, commit)
+	if err != nil {
+		return false, err
+	}
+	if !found || !bytes.Equal(actual, expected) {
+		return false, nil
+	}
+	if err := repo.DeleteNoteRef(ref, commit); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RefValue returns a validated object ID stored in ref.
+func (repo *Repo) RefValue(ref string) (string, bool, error) {
+	if err := validateRefName(ref); err != nil {
+		return "", false, err
+	}
+	out, err := repo.run("read ref", nil, revParse, verify, ref)
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 128 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	value := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(value) {
+		return "", false, errors.New("git returned invalid ref object ID")
+	}
+	return value, true, nil
+}
+
+func validateRevision(value, name string) error {
+	if value == "" {
+		return fmt.Errorf("%s is empty", name)
+	}
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("%s cannot start with '-'", name)
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return fmt.Errorf("%s contains whitespace or a control character", name)
+		}
+	}
+	return nil
+}
+
+func validateRefName(value string) error {
+	if value == "" || strings.ContainsRune(value, 0) ||
+		strings.ContainsAny(value, " \t\r\n~^:?*[\\") ||
+		strings.Contains(value, "..") || strings.Contains(value, "@{") ||
+		strings.HasPrefix(value, "-") {
+		return errors.New("invalid Git reference")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return errors.New("invalid Git reference")
+		}
+	}
+	return nil
+}
+
+func validateNoteRef(ref string) error {
+	if ref == "" {
+		return errors.New("note ref is empty")
+	}
+	if ref != "refs/notes" && !strings.HasPrefix(ref, "refs/notes/") {
+		return errors.New("note ref must be under refs/notes")
+	}
+	for _, char := range ref {
+		if unicode.IsControl(char) || unicode.IsSpace(char) ||
+			strings.ContainsRune("~^:?*[\\", char) {
+			return errors.New("note ref contains an invalid ref-format character")
+		}
+	}
+	if ref == "@" || strings.Contains(ref, "..") || strings.Contains(ref, "@{") ||
+		strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") ||
+		strings.HasSuffix(ref, ".") || strings.Contains(ref, "//") {
+		return errors.New("note ref is not a valid Git ref")
+	}
+	for _, component := range strings.Split(ref, "/") {
+		if component == "" || component == "." || component == ".." ||
+			strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".") ||
+			strings.HasSuffix(component, ".lock") {
+			return errors.New("note ref is not a valid Git ref")
+		}
+	}
+	return nil
+}
+
+// noteWriteError annotates note write failures caused by a missing Git
+// committer identity. The subprocess environment strips GIT_* variables, so
+// the note writer identity can only come from Git configuration.
+func noteWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && isMissingIdentity(commandErr.Stderr) {
+		return fmt.Errorf("%w; set user.name and user.email with git config", err)
+	}
+	return err
+}
+
+// isMissingIdentity reports git output that fails for a missing committer
+// identity rather than a note or repository problem.
+func isMissingIdentity(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "identity unknown") ||
+		strings.Contains(lower, "unable to auto-detect email address")
+}
+
+// ProtectBlobs updates the local retention ref.
+func (repo *Repo) ProtectBlobs(oids []string) error {
+	unique := map[string]bool{}
+	for _, oid := range oids {
+		if !model.ValidObjectID(oid) {
+			return errors.New("invalid retained blob object ID")
+		}
+		unique[oid] = true
+	}
+	if len(unique) == 0 {
+		_, err := repo.run("delete retention ref", nil, "update-ref", "-d", "refs/worktree/attributed/checkpoints")
+		if err != nil {
+			var commandErr *CommandError
+			if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+				return nil
+			}
+		}
+		return err
+	}
+	oids = oids[:0]
+	for oid := range unique {
+		oids = append(oids, oid)
+	}
+	sort.Strings(oids)
+	var tree bytes.Buffer
+	for i, oid := range oids {
+		fmt.Fprintf(&tree, "100644 blob %s\tblob-%08d\n", oid, i)
+	}
+	out, err := repo.run("write retention tree", &tree, "mktree")
+	if err != nil {
+		return err
+	}
+	treeID := strings.TrimSpace(string(out))
+	if !model.ValidObjectID(treeID) {
+		return errors.New("git returned invalid retention tree ID")
+	}
+	_, err = repo.run("update retention ref", nil, "update-ref", "refs/worktree/attributed/checkpoints", treeID)
+	return err
+}
+
+// ProtectedBlobCount reports retained snapshots.
+func (repo *Repo) ProtectedBlobCount() (int, error) {
+	out, err := repo.run("count retained snapshots", nil, "ls-tree", "-r", "--name-only", "refs/worktree/attributed/checkpoints")
+	if err != nil {
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 128 {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return 0, nil
+	}
+	return len(bytes.Split(bytes.TrimSpace(out), []byte{'\n'})), nil
+}
+
+// FirstParentHistory returns commits newest first.
+func (repo *Repo) FirstParentHistory(start string) ([]string, error) {
+	if !model.ValidObjectID(start) {
+		return nil, errors.New("invalid start commit object ID")
+	}
+	out, err := repo.run("read first-parent history", nil, "rev-list", "--first-parent", start)
+	if err != nil {
+		return nil, err
+	}
+	var commits []string
+	for _, line := range strings.Fields(string(out)) {
+		if !model.ValidObjectID(line) {
+			return nil, errors.New("git returned invalid history object ID")
+		}
+		commits = append(commits, line)
+	}
+	return commits, nil
+}
+
+// ConfigPath returns a local Git config path value.
+func (repo *Repo) ConfigPath(key string) (string, bool, error) {
+	out, err := repo.run("read git config", nil, "config", "--local", "--path", "--get", key)
+	if err == nil {
+		return strings.TrimSpace(string(out)), true, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
+// GlobalConfig reads the effective user-level Git configuration value.
+func GlobalConfig(key string) (string, bool, error) {
+	values, err := GlobalConfigValues(key)
+	if err != nil {
+		return "", false, err
+	}
+	if len(values) == 0 {
+		return "", false, nil
+	}
+	return values[len(values)-1], true, nil
+}
+
+// GlobalConfigValues reads every effective user-level value, including
+// values from include files.
+func GlobalConfigValues(key string) ([]string, error) {
+	if err := validateGlobalConfigKey(key); err != nil {
+		return nil, err
+	}
+	out, err := runGitOutsideRepo(
+		"read global git config",
+		"config", globalConfig, "--includes", "--null", "--get-all", key,
+	)
+	if err == nil {
+		if len(out) == 0 || out[len(out)-1] != 0 {
+			return nil, errors.New("global git config returned malformed values")
+		}
+		parts := bytes.Split(out[:len(out)-1], []byte{0})
+		values := make([]string, len(parts))
+		for index, part := range parts {
+			values[index] = string(part)
+		}
+		return values, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+		return nil, nil
+	}
+	return nil, err
+}
+
+// SetGlobalConfig writes one user-level Git configuration value.
+func SetGlobalConfig(key, value string) error {
+	if err := validateGlobalConfigKey(key); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, 0) {
+		return errors.New("global git config value contains NUL")
+	}
+	_, err := runGitOutsideRepo("write global git config", "config", globalConfig, key, value)
+	return err
+}
+
+// AddGlobalConfig appends one user-level Git configuration value.
+func AddGlobalConfig(key, value string) error {
+	if err := validateGlobalConfigKey(key); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, 0) {
+		return errors.New("global git config value contains NUL")
+	}
+	_, err := runGitOutsideRepo(
+		"add global git config",
+		"config", globalConfig, "--add", key, value,
+	)
+	return err
+}
+
+// UnsetGlobalConfig removes all matching values from the writable global
+// file and reports whether a value was removed.
+func UnsetGlobalConfig(key, value string) (bool, error) {
+	if err := validateGlobalConfigKey(key); err != nil {
+		return false, err
+	}
+	if strings.ContainsRune(value, 0) {
+		return false, errors.New("global git config value contains NUL")
+	}
+	_, err := runGitOutsideRepo(
+		"unset global git config",
+		"config", globalConfig, "--fixed-value", "--unset-all", key, value,
+	)
+	if err == nil {
+		values, readErr := GlobalConfigValues(key)
+		if readErr != nil {
+			return true, fmt.Errorf("check remaining global git config: %w", readErr)
+		}
+		for _, current := range values {
+			if current == value {
+				return true, fmt.Errorf(
+					"global git config %s value %q is also defined in an included file",
+					key,
+					value,
+				)
+			}
+		}
+		return true, nil
+	}
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode == 5 {
+		values, readErr := GlobalConfigValues(key)
+		if readErr != nil {
+			return false, fmt.Errorf("check remaining global git config: %w", readErr)
+		}
+		for _, current := range values {
+			if current == value {
+				return false, fmt.Errorf(
+					"global git config %s value %q is defined in an included file",
+					key,
+					value,
+				)
+			}
+		}
+		return false, nil
+	}
+	return false, err
+}
+
+func validateGlobalConfigKey(key string) error {
+	if key == "" || strings.ContainsRune(key, 0) {
+		return errors.New("global git config key is empty or contains NUL")
+	}
+	return nil
+}
+
+// runGitOutsideRepo runs one Git command that needs no repository, such as
+// user-level configuration, with the same environment stripping, output
+// limits, and timeout as repository commands.
+func runGitOutsideRepo(operation string, args ...string) ([]byte, error) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return nil, fmt.Errorf("find git executable: %w", err)
+	}
+	temp := &Repo{gitBin: gitBin}
+	return temp.run(operation, nil, args...)
+}
+
+func tempFile(dir, pattern string, data []byte) (string, error) {
+	file, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("create temporary file: %w", err)
+	}
+	name := file.Name()
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("write temporary file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(name)
+		return "", fmt.Errorf("close temporary file: %w", err)
+	}
+	return name, nil
+}
+
+func (repo *Repo) text(operation string, stdin io.Reader, args ...string) (string, error) {
+	out, err := repo.run(operation, stdin, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// GitPath resolves one Git-managed path as an absolute path.
+func (repo *Repo) GitPath(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, 0) {
+		return "", errors.New("Git path name is empty or contains NUL")
+	}
+	out, err := repo.run(
+		"resolve Git path",
+		nil,
+		revParse,
+		absolutePaths,
+		"--git-path",
+		name,
+	)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" || !filepath.IsAbs(path) {
+		return "", errors.New("Git returned a non-absolute managed path")
+	}
+	return filepath.Clean(path), nil
+}
+
+func (repo *Repo) run(operation string, stdin io.Reader, args ...string) ([]byte, error) {
+	return repo.runLimited(operation, maxOutputBytes, stdin, args...)
+}
+
+func (repo *Repo) runWithStderr(
+	operation string,
+	stdin io.Reader,
+	args ...string,
+) ([]byte, string, error) {
+	return repo.runLimitedWithStderr(operation, maxOutputBytes, stdin, args...)
+}
+
+func (repo *Repo) runLimited(
+	operation string,
+	outputLimit int,
+	stdin io.Reader,
+	args ...string,
+) ([]byte, error) {
+	out, _, err := repo.runLimitedWithStderr(operation, outputLimit, stdin, args...)
+	return out, err
+}
+
+func (repo *Repo) runLimitedWithStderr(
+	operation string,
+	outputLimit int,
+	stdin io.Reader,
+	args ...string,
+) ([]byte, string, error) {
+	stdout := &limitedBuffer{limit: outputLimit}
+	stderrText, err := repo.runOutput(operation, stdin, stdout, args...)
+	if err != nil {
+		return nil, stderrText, err
+	}
+	return stdout.Bytes(), stderrText, nil
+}
+
+// outputSink takes the standard output of one Git command. outputError
+// reports output that the sink refused.
+type outputSink interface {
+	io.Writer
+	outputError(operation string) error
+}
+
+// runOutput runs one Git command with its standard output going to stdout.
+// A timeout or refused output is reported instead of the exit status,
+// because the kill or the broken pipe it causes can decide that status.
+func (repo *Repo) runOutput(
+	operation string,
+	stdin io.Reader,
+	stdout outputSink,
+	args ...string,
+) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, repo.gitBin, args...)
+	command.Dir = repo.Root
+	command.Env = append(gitEnvironment(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ATTRIBUTED_NESTED=1",
+		"LC_ALL=C",
+	)
+	command.Stdin = stdin
+	stderr := limitedBuffer{limit: maxOutputBytes}
+	command.Stdout = stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("git %s timed out: %w", operation, ctx.Err())
+	}
+	if limitErr := stderr.outputError(operation); limitErr != nil {
+		return "", limitErr
+	}
+	if outputErr := stdout.outputError(operation); outputErr != nil {
+		return "", outputErr
+	}
+	stderrText := strings.TrimSpace(stderr.String())
+	if err != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		return stderrText, &CommandError{
+			Operation: operation,
+			ExitCode:  exitCode,
+			Stderr:    stderrText,
+			Err:       err,
+		}
+	}
+	return stderrText, nil
+}
+
+// streamRecords runs one Git command and hands each record of its output,
+// cut at delimiter, to handle while Git is still writing. The output is
+// never held at once, so only a single record has a size limit. The first
+// handle error stops Git and is returned as it is.
+func (repo *Repo) streamRecords(operation string, delimiter byte, handle func(string) error, args ...string) error {
+	records := &recordWriter{operation: operation, delimiter: []byte{delimiter}, handle: handle}
+	if _, err := repo.runOutput(operation, nil, records, args...); err != nil {
+		return err
+	}
+	return records.finish()
+}
+
+// gitEnvironment drops the GIT_ variables a hook inherits, like GIT_DIR or
+// GIT_INDEX_FILE, because they describe the operation that runs the hook.
+// The variables that choose the system and global configuration stay, so
+// git-attributed reads the same ignore rules, line ending, and long path
+// settings as the Git of the user. Git for Windows keeps those settings in
+// the system file.
+var configFileVariables = map[string]bool{
+	"GIT_CONFIG_NOSYSTEM": true,
+	"GIT_CONFIG_SYSTEM":   true,
+	"GIT_CONFIG_GLOBAL":   true,
+}
+
+func gitEnvironment() []string {
+	source := os.Environ()
+	result := make([]string, 0, len(source))
+	for _, value := range source {
+		name, _, _ := strings.Cut(value, "=")
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "GIT_") && !configFileVariables[upper] {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
+}
+
+type limitedBuffer struct {
+	data     bytes.Buffer
+	exceeded bool
+	limit    int
+}
+
+func (buffer *limitedBuffer) Write(data []byte) (int, error) {
+	original := len(data)
+	remaining := buffer.maxBytes() - buffer.data.Len()
+	if remaining <= 0 {
+		buffer.exceeded = true
+		return original, nil
+	}
+	if len(data) > remaining {
+		buffer.exceeded = true
+		data = data[:remaining]
+	}
+	_, _ = buffer.data.Write(data)
+	return original, nil
+}
+
+func (buffer *limitedBuffer) Bytes() []byte {
+	return buffer.data.Bytes()
+}
+
+func (buffer *limitedBuffer) String() string {
+	return buffer.data.String()
+}
+
+// outputError reports output that the buffer dropped at its limit.
+func (buffer *limitedBuffer) outputError(operation string) error {
+	if !buffer.exceeded {
+		return nil
+	}
+	return fmt.Errorf("git %s: %w of %d bytes", operation, ErrOutputLimit, buffer.maxBytes())
+}
+
+func (buffer *limitedBuffer) maxBytes() int {
+	if buffer.limit <= 0 {
+		return maxOutputBytes
+	}
+	return buffer.limit
+}
+
+// recordWriter cuts Git output into records and skips empty ones. After the
+// first error it refuses more output, so Git gets a broken pipe and stops.
+type recordWriter struct {
+	operation string
+	delimiter []byte
+	handle    func(string) error
+	partial   []byte
+	err       error
+}
+
+func (writer *recordWriter) Write(data []byte) (int, error) {
+	size := len(data)
+	for writer.err == nil {
+		record, rest, found := bytes.Cut(data, writer.delimiter)
+		writer.partial = append(writer.partial, record...)
+		switch {
+		case len(writer.partial) > maxRecordBytes:
+			writer.err = fmt.Errorf("git %s: record over %d bytes: %w",
+				writer.operation, maxRecordBytes, ErrOutputLimit)
+		case !found:
+			return size, nil
+		default:
+			writer.emit()
+			data = rest
+		}
+	}
+	return 0, writer.err
+}
+
+// finish hands over a last record that Git did not end with the delimiter.
+func (writer *recordWriter) finish() error {
+	writer.emit()
+	return writer.err
+}
+
+func (writer *recordWriter) emit() {
+	record := string(writer.partial)
+	writer.partial = writer.partial[:0]
+	if record != "" {
+		writer.err = writer.handle(record)
+	}
+}
+
+func (writer *recordWriter) outputError(string) error {
+	return writer.err
+}
+
+func splitNUL(data []byte) []string {
+	data = bytes.TrimSuffix(data, []byte{0})
+	if len(data) == 0 {
+		return nil
+	}
+	raw := bytes.Split(data, []byte{0})
+	values := make([]string, len(raw))
+	for i, value := range raw {
+		values[i] = string(value)
+	}
+	return values
+}
+
+// Version returns the installed Git version components.
+func (repo *Repo) Version() (major, minor int, err error) {
+	out, err := repo.run("read version", nil, "version")
+	if err != nil {
+		return 0, 0, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		return 0, 0, errors.New("git returned invalid version")
+	}
+	parts := strings.Split(fields[2], ".")
+	if len(parts) < 2 {
+		return 0, 0, errors.New("git returned invalid version")
+	}
+	major, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, errors.New("git returned invalid major version")
+	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, errors.New("git returned invalid minor version")
+	}
+	return major, minor, nil
+}

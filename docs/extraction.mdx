@@ -1,0 +1,88 @@
+---
+title: "Extract Attributed from the pinned tree"
+sidebarTitle: "Extraction slices"
+description: "How Attributed imports git-byline, renames it, and narrows it in independently checked slices."
+keywords: ["git-attributed", "import", "rename", "projection"]
+---
+
+Attributed starts from a reproducible import of the [pinned upstream tree](/baseline), not from a fork of its history. Each later slice changes one owner and keeps its own evidence. Run the [qualification plan](/qualification) checks that a slice affects before merging it.
+
+## Reproduce the import
+
+[`tools/upstream-import/import_upstream.py`](https://github.com/amichne/attributed/blob/main/tools/upstream-import/import_upstream.py) reads blobs from commit `d4260838249720bcea3a746cce809e5a1955248a`. It drops the excluded paths, applies the naming map to paths and content, and runs `gofmt`. It refuses an existing destination, a symlink or submodule entry, non-UTF-8 content, a rename collision, and any `byline` or `comarch` text that survives outside the files kept verbatim.
+
+Verify import commit `11c6d61` from the repository root with Git, `uv`, and `gofmt` on `PATH`:
+
+```sh
+work=$(mktemp -d)
+git clone --no-checkout https://github.com/comarch/git-byline.git "$work/upstream"
+uv run --locked --script tools/upstream-import/import_upstream.py "$work/upstream" "$work/import"
+mkdir "$work/tree" && git archive 11c6d61 | tar -x -C "$work/tree"
+diff -r -x .mintlify -x docs -x README.md -x LICENSE.upstream -x upstream-import \
+  "$work/import" "$work/tree" && echo MATCH
+```
+
+The excluded names are the files that existed before the import and the codemod itself. Two independent runs produced identical trees, and this check printed `MATCH`.
+
+### Paths left out
+
+| Group | Paths | Reason |
+| --- | --- | --- |
+| Contributor agents | `.claude`, `.codex`, `.cursor`, `.factory`, `.gemini`, `.grok`, `.opencode`, `.windsurf`, `.promptscript`, `promptscript.yaml`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `OPENCODE.md`, `gemini-extension.json` | Upstream instructions and hooks for its own contributors. `.claude/settings.json` would run capture hooks in every agent session in this checkout. |
+| Hosted automation | `.github`, `.gitlab`, `.coderabbit.yaml`, `.goreleaser.yml`, release-please files, `renovate.json`, `codecov.yml`, `sonar-project.properties` | Workflows would run against this repository on push or pull request, and release jobs publish. Attributed adds its own automation as a separate decision. |
+| Upstream gate | `tools/validate` | It checks the excluded release manifests, PromptScript output, and marketplace listings. With them absent, 21 of its tests fail on missing files. |
+| Marketplace listings | `.claude-plugin`, `.factory-plugin` | Listings name the upstream publisher. The plugin payloads under `marketplace/` remain. |
+| Project documents | `docs`, `website`, `README.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` | Attributed keeps its own documentation. `LICENSE.upstream` holds the upstream notice. |
+
+## Naming map
+
+Every upstream name changes to an Attributed name. The rules apply in this order to paths and to content:
+
+| Upstream form | Attributed form | Examples |
+| --- | --- | --- |
+| `comarch.git-byline` | `amichne.attributed` | Agent Trace metadata key |
+| `comarch/git-byline` | `amichne/attributed` | Module path, release and raw URLs, action references |
+| `git-byline` | `git-attributed` | Binary, `cmd/git-attributed`, hook commands, backup suffixes |
+| `BYLINE` | `ATTRIBUTED` | `GIT_ATTRIBUTED_VERSION`, `ATTRIBUTED_BIN` |
+| `Byline` | `Attributed` | Go identifiers such as `readAttributed` |
+| `byline` | `attributed` | `refs/notes/attributed`, `refs/worktree/attributed/checkpoints`, `.git/attributed/` state |
+
+The binary stays a Git subcommand, so `git attributed blame <file>` works when `git-attributed` is on `PATH`. Plugin author fields name the Attributed maintainer. `marketplace/git-attributed/LICENSE` keeps the upstream notice byte for byte.
+
+The rename changes wire identities, so an Attributed install does not read or write upstream records:
+
+- Notes live under `refs/notes/attributed`, `refs/notes/attributed-stash`, and `refs/notes/attributed-remote`. Read a note with `git notes --ref=attributed show <commit>`.
+- Worktree state lives under `attributed/` in the Git directory, with snapshots reachable from `refs/worktree/attributed/checkpoints`.
+- Hook ownership markers name `git-attributed`. Uninstall does not remove hooks that upstream installed.
+- Git AI export hashes the producer name into the synthetic human ID and the checkpoint trace IDs. The import regenerates `internal/interop/testdata/gitai-export.golden` from `sha256("git-attributed")` and `sha256("git-attributed:checkpoint:7")`.
+
+Reading existing `refs/notes/byline` records is a separate compatibility decision. It needs a fixture from an upstream install and a test that keeps the two namespaces distinct.
+
+## License in the binary
+
+Attributed is MIT licensed. `LICENSE` holds the Attributed notice and `LICENSE.upstream` holds the Comarch notice. The root package embeds both files, and `git-attributed license` prints them. The release-style build test checks that the compiled binary prints both copyright lines. Release archives should also include both files when release automation exists.
+
+## Slices
+
+| Order | Slice | Status | Decisive check |
+| --- | --- | --- | --- |
+| 1 | Import the pinned tree with the naming map | Done | Codemod output matches the import commit. All 22 packages and the 17-stage smoke suite pass. |
+| 2 | Embed the license notices | Done | `go test ./...` passed 23 packages, 994 top-level tests, and 1,569 subtests, including the built-binary license check. |
+| 3 | Project harness integrations | Planned | The projector reproduces the imported `marketplace/harness` bytes before any payload changes. |
+| 4 | Remove out-of-scope producers | Planned | `go list -deps ./cmd/git-attributed` shows only the candidate closure. Each removed test maps to a removed capability. |
+| 5 | Decide legacy note compatibility | Planned | A fixture from an upstream install reads correctly, or the documents state that it is not read. |
+
+### Project harness integrations
+
+Upstream generated its hook payloads from `.promptscript` sources with the optional PromptScript CLI. The generator stays upstream, so the imported payloads under `marketplace/harness` and `marketplace/git-attributed` have no source owner. Follow the Slopsentral projection pattern instead:
+
+1. Write one typed definition per harness: capture events, matchers, command, timeout, and install location.
+2. Freeze the definition bytes and modes. Evaluate typed Pkl models into a provider plan.
+3. Materialize payloads, seal their digests in a lock, and publish to a fresh destination that rejects replacement.
+4. Fail with a finite stage and code for missing assets, conflicting identities, incomplete plans, or changed inputs.
+
+The first projection must reproduce the imported bytes exactly. Payload changes come after parity. A projected file shows only what the package contains. Harness discovery and hook delivery still need evidence from a live session.
+
+### Remove out-of-scope producers
+
+Remove `dashboard`, `report`, `disclosure`, `ci`, and `runner` with their commands: `dashboard`, `stats`, `check`, `disclosure`, `ci install`, `update`, and `version --check`. `internal/app/product.go` also calls `ci` from the install and uninstall paths, which provision forge workflows, so trim those callers in the same slice. Remove token accounting from `blame --tokens` and the usage collectors while keeping old notes that carry token fields readable. Remove `install.sh`, `install.ps1`, `action.yml`, and `action/` with the update path, since they download releases that do not exist yet. Keep `transcript` where model resolution needs it.

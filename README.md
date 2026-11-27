@@ -2,12 +2,21 @@
 
 Which lines in a commit can you trace to an observed agent edit? Attributed aims to answer that question with a small Go distribution derived from Comarch’s git-byline. Agent hooks capture edits, a reconciler matches the evidence to the lines Git actually commits, and Git notes carry the result alongside history.
 
-**Upstream qualification is in progress.** This first commit pins the reference implementation and records its build, tests, and known gaps. The Attributed CLI is still to be extracted. Upstream can label unexplained lines as human, and overlapping shell events can be ambiguous when the harness supplies no event ID.
+**Extraction is in progress.** This tree imports the pinned upstream source with every `byline` name changed to `attributed`. It builds `git-attributed`, which Git runs as `git attributed`. Notes live under `refs/notes/attributed`. No upstream capability has been removed yet. Like upstream, it can label unexplained lines as human, and overlapping shell events can be ambiguous when the harness supplies no event ID.
 
 ## Start here
 
 - [Reproduce the upstream baseline](docs/baseline.mdx) to build the pinned binary, run its tests, and compare sizes under the same conditions.
 - [Read the qualification plan](docs/qualification.mdx) for the package boundaries, acceptance checks, and decisions that need separate proposals.
+- [Follow the extraction slices](docs/extraction.mdx) for the import, the naming map, and the order of later changes.
+
+Build and test from this checkout with Go 1.24 or later:
+
+```sh
+CGO_ENABLED=0 go build -trimpath -o git-attributed ./cmd/git-attributed
+go test ./...
+ATTRIBUTED_BIN=./git-attributed bash scripts/smoke.sh
+```
 
 ## Design constraints
 
@@ -26,6 +35,6 @@ mint dev --no-open
 
 Run `mint validate` and `mint broken-links` in the same directory before committing documentation changes. Hosted publication requires separate authorization.
 
-## Upstream license
+## License
 
-Comarch S.A. licenses git-byline under MIT. Include the [upstream copyright and permission notice](LICENSE.upstream) with copies or substantial portions of the upstream software, including binary distributions. [Pinned source](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/LICENSE).
+Attributed is available under the [MIT License](LICENSE). It derives from git-byline, which Comarch S.A. licenses under MIT, so copies keep the [upstream notice](LICENSE.upstream) as well. Every binary embeds both notices, and `git-attributed license` prints them. [Pinned upstream license](https://github.com/comarch/git-byline/blob/d4260838249720bcea3a746cce809e5a1955248a/LICENSE).

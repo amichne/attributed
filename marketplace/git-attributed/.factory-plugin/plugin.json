@@ -1,0 +1,17 @@
+{
+  "name": "git-attributed",
+  "description": "Install and use local human and AI line attribution",
+  "version": "1.8.0",
+  "author": {
+    "name": "Austin Michne"
+  },
+  "homepage": "https://github.com/amichne/attributed",
+  "repository": "https://github.com/amichne/attributed",
+  "license": "MIT",
+  "keywords": [
+    "git",
+    "attribution",
+    "ai",
+    "provenance"
+  ]
+}
