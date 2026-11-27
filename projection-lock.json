@@ -1,0 +1,13 @@
+{
+  "files": {
+    ".claude-plugin/marketplace.json": "b660be3b86bf5a9132ce5946bbc7c41788e3b648e439b4ca6c69872b5e35b437",
+    "plugins/git-attributed/.claude-plugin/plugin.json": "cca27465882eef554127307597676c42863abd76882c99295cb576d1ad71f47c",
+    "plugins/git-attributed/LICENSE": "5739e47ce8e4f54a80975ce5335ab2e56b078e2558d27eab6556650fe032c69a",
+    "plugins/git-attributed/README.md": "b81ab8ce87aa62ea215865c7d8ce69bc4adb894a54219e51f6976157ee15df7a",
+    "plugins/git-attributed/commands/git-attributed-setup.md": "3adc89e99281657347ea3857bddc538d40c4648049bb8afa763d953f7b6a9f6b",
+    "plugins/git-attributed/skills/git-attributed/SKILL.md": "7b0b2b91fb928ac51076e8c9696e9219be52294a805f8ad992da6e378f24f735"
+  },
+  "pkl": "0.33.0",
+  "sourceSha": "6c598a1f02753a87ae1406ae1c43a312402553110e71e49f4e2f1e52d5b20f9f",
+  "version": 1
+}

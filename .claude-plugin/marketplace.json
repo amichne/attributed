@@ -1,0 +1,22 @@
+{
+  "name": "attributed",
+  "description": "Local human and AI line attribution for Git",
+  "owner": {
+    "name": "Austin Michne"
+  },
+  "plugins": [
+    {
+      "name": "git-attributed",
+      "source": "./plugins/git-attributed",
+      "description": "Install and use local human and AI line attribution",
+      "category": "developer-tools",
+      "homepage": "https://github.com/amichne/attributed",
+      "keywords": [
+        "git",
+        "attribution",
+        "ai",
+        "provenance"
+      ]
+    }
+  ]
+}
