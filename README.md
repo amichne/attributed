@@ -18,6 +18,8 @@ go test ./...
 ATTRIBUTED_BIN=./git-attributed bash scripts/smoke.sh
 ```
 
+CI runs on pull requests and on `main`. It runs the Go suite and the smoke test on Linux and macOS, the Python tool checks, the projection drift check, and documentation validation. `.github/actions/toolchain` provisions the checksum-pinned uv and Pkl from `tools/toolchain/toolchain.json`. To use the same tools locally, run `python3 tools/toolchain/toolchain.py run -- <command>`.
+
 `marketplace/` and `commands/` are generated from `integrations/`. With Pkl 0.33.0 and `uv` installed, check them with `uv run --locked --script tools/projection/project.py check`. The [projection section](docs/extraction.mdx#project-harness-integrations) explains how to change and regenerate them.
 
 ## Design constraints
