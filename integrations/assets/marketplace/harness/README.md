@@ -2,8 +2,14 @@
 
 This directory carries the two files each agent needs, ready to copy.
 
-Install `git-attributed` with Go 1.24 or later and put `$(go env GOPATH)/bin`
-on `PATH`. The setup commands find it there and stop if it is missing:
+Install `git-attributed` on `PATH`. The setup commands find it there and stop
+if it is missing:
+
+```sh
+brew install amichne/tap/git-attributed
+```
+
+Or build it with Go 1.24 or later and put `$(go env GOPATH)/bin` on `PATH`:
 
 ```sh
 go install github.com/amichne/attributed/cmd/git-attributed@latest

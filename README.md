@@ -5,7 +5,7 @@
 [![CI](https://github.com/amichne/attributed/actions/workflows/ci.yml/badge.svg)](https://github.com/amichne/attributed/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-266452)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/amichne/attributed)](go.mod)
-[![Docs](https://img.shields.io/badge/docs-attributed.mintlify.app-266452)](https://attributed.mintlify.app)
+[![Docs](https://img.shields.io/badge/docs-attributed.michne.com-266452)](https://attributed.michne.com)
 
 ![git attributed blame shows Ada's lines as human and Claude Code's lines as ai:claude/claude-opus-5-5](docs/assets/blame.gif)
 
@@ -25,7 +25,7 @@ Or build it with Go 1.24 or later and put `$(go env GOPATH)/bin` on `PATH`:
 go install github.com/amichne/attributed/cmd/git-attributed@latest
 ```
 
-Git runs the binary as `git attributed`. Release archives and their checksums are on the [releases page](https://github.com/amichne/attributed/releases), and the docs explain [installing through a Homebrew mirror](https://attributed.mintlify.app/#install-through-a-homebrew-mirror).
+Git runs the binary as `git attributed`. Release archives and their checksums are on the [releases page](https://github.com/amichne/attributed/releases), and the docs explain [installing through a Homebrew mirror](https://attributed.michne.com/#install-through-a-homebrew-mirror).
 
 ## Quick start
 
@@ -48,7 +48,7 @@ Use `--agent droid` for Factory. For other agents, see [`marketplace/harness`](m
 - **Notes are never overwritten.** A push with conflicting notes stops instead of replacing anything.
 - **It is just Git.** Everything lives in refs, notes, and hooks you can read or delete with plain Git, even after uninstalling.
 
-Unobserved lines count as the commit author's, and the docs list the other rough edges. [What you can rely on](https://attributed.mintlify.app/safety) and [How Attributed uses Git](https://attributed.mintlify.app/git) cover the details.
+Unobserved lines count as the commit author's, and the docs list the other rough edges. [What you can rely on](https://attributed.michne.com/safety) and [How Attributed uses Git](https://attributed.michne.com/git) cover the details.
 
 ## Development
 
