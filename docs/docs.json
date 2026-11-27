@@ -14,5 +14,16 @@
         "pages": ["baseline", "qualification", "extraction"]
       }
     ]
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/amichne/attributed"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/amichne/attributed"
+    }
   }
 }

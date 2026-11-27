@@ -30,14 +30,14 @@ Carry an attribution only as far as the evidence supports it. Unobserved authors
 
 ## Documentation
 
-With Node.js and the Mintlify CLI installed, preview the documentation from this checkout:
+The documentation is published at [attributed.mintlify.app](https://attributed.mintlify.app), built from `docs/` on `main`. With Node.js and the Mintlify CLI installed, preview it from this checkout:
 
 ```sh
 cd docs
 mint dev --no-open
 ```
 
-Run `mint validate` and `mint broken-links` in the same directory before committing documentation changes. Hosted publication requires separate authorization.
+Run `mint validate` and `mint broken-links` in the same directory before committing documentation changes. CI runs both on every pull request.
 
 ## License
 
