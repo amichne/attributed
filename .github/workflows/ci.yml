@@ -68,6 +68,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - uses: ./.github/actions/toolchain
 
       - name: Ruff
@@ -83,7 +88,7 @@ jobs:
       - name: Pytest
         working-directory: tools
         run: |
-          for suite in projection publish toolchain; do
+          for suite in projection publish release toolchain; do
             (cd "$suite" && uv run --no-project --with pytest==8.4.2 python -m pytest -q -p no:cacheprovider .)
           done
 

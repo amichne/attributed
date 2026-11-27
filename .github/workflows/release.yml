@@ -1,0 +1,107 @@
+name: Release
+
+# A vX.Y.Z tag builds reproducible archives for macOS and Linux, attests
+# their provenance, publishes a GitHub release, and updates the formula in
+# amichne/homebrew-tap.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ github.ref_name }}
+    env:
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: ./.github/actions/toolchain
+
+      - name: Test
+        run: go test -count=1 -timeout=15m ./...
+
+      - name: Build archives
+        run: uv run --locked --script tools/release/release.py build --version "$GITHUB_REF_NAME" --out "$RUNNER_TEMP/dist"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/dist/*.tar.gz
+
+      - name: Render formula
+        run: |
+          uv run --locked --script tools/release/release.py formula --version "$GITHUB_REF_NAME" \
+            --checksums "$RUNNER_TEMP/dist/checksums.txt" --out "$RUNNER_TEMP/git-attributed.rb"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/dist/* \
+            --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Archives for macOS and Linux on arm64 and amd64, each with LICENSE and LICENSE.upstream. Verify with checksums.txt or \`gh attestation verify <archive> --repo $GITHUB_REPOSITORY\`."
+
+      - name: Upload formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: formula
+          path: ${{ runner.temp }}/git-attributed.rb
+          if-no-files-found: error
+
+  tap:
+    name: Update amichne/homebrew-tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download formula
+        uses: actions/download-artifact@v4
+        with:
+          name: formula
+          path: ${{ runner.temp }}/formula
+
+      - name: Commit the formula to the tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; commit the uploaded formula artifact to amichne/homebrew-tap by hand."
+            exit 0
+          fi
+          tap="$RUNNER_TEMP/tap"
+          git clone --quiet "https://x-access-token:${TAP_TOKEN}@github.com/amichne/homebrew-tap.git" "$tap"
+          mkdir -p "$tap/Formula"
+          cp "$RUNNER_TEMP/formula/git-attributed.rb" "$tap/Formula/git-attributed.rb"
+          cd "$tap"
+          git add Formula/git-attributed.rb
+          if git diff --cached --quiet; then
+            echo "Formula already current."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "git-attributed $VERSION" -m "Source-Commit: $GITHUB_SHA"
+          git push --quiet origin HEAD:main
