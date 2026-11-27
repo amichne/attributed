@@ -61,7 +61,25 @@ git attributed blame path/to/file
 git attributed verify
 ```
 
-Use `--agent droid` for Factory. By default, the Git pre-push hook shares attribution notes with the remote you push to. Add `--local-notes` when installing the Git hooks to disable automatic note sharing.
+By default, the Git pre-push hook shares attribution notes with the remote you push to. Add `--local-notes` when installing the Git hooks to disable automatic note sharing.
+
+## Supported agents
+
+`--agent` takes one agent, a comma-separated list such as `claude,copilot`, or `all`. Without it, `install-hooks` installs the Claude Code and Factory hooks.
+
+| Agent | `--agent` | Hook file | Before the hooks run |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `.claude/settings.json` | Nothing |
+| Factory | `droid` | `.factory/hooks.json` | Nothing |
+| Codex | `codex` | `.codex/hooks.json` | Trust the project, then approve the hooks in `/hooks` |
+| GitHub Copilot CLI | `copilot` | `.github/hooks/git-attributed.json` | Trust the folder |
+| Devin CLI | `devin` | `.devin/hooks.v1.json` | Nothing documented |
+
+Add `--user` to write the user-level files instead: `~/.claude/settings.json`, `~/.factory/hooks.json`, `$CODEX_HOME/hooks.json`, `$COPILOT_HOME/hooks/git-attributed.json`, and `~/.config/devin/config.json`.
+
+The Claude Code, Factory, Codex, and Copilot hooks were tested against real sessions. The Devin hooks follow Devin's documentation, which does not list the input of its file tools, so Attributed accepts the usual spellings. Copilot sends no model name, so its lines read `ai:copilot/unknown`.
+
+Copilot and Devin also run the hooks in `.claude/settings.json`. Attributed's Claude Code hook recognizes their input and skips it, so their edits are recorded only by their own hooks and never as Claude Code's.
 
 ## Agent plugins
 
@@ -73,7 +91,7 @@ The Claude Code, Factory, and Gemini CLI packages each provide `/git-attributed-
 | Factory | [Factory marketplace](https://github.com/amichne/attributed/tree/harness/factory) |
 | Gemini CLI | [Gemini CLI extension](https://github.com/amichne/attributed/tree/harness/gemini) |
 
-The [agent setup guide](https://github.com/amichne/attributed/tree/main/marketplace/harness) lists the install commands and the files to copy for agents without a published package. For manual setup, install the agent's hook and run `git attributed install-hooks --agent none --git --project` in the repository.
+The [agent setup guide](https://github.com/amichne/attributed/tree/main/marketplace/harness) has setup commands for Codex and Copilot, and the hook files to copy for Cursor, VS Code, Windsurf, Grok, OpenCode, and Gemini CLI. After copying one, run `git attributed install-hooks --agent none --git --project` in the repository.
 
 ## Next
 

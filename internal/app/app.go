@@ -153,8 +153,10 @@ func commands() []*command {
 		{
 			name:  "install-hooks",
 			short: "install agent and Git hooks",
-			usage: "Usage: git-attributed install-hooks [--agent droid|claude|all|none] [--git] [--local-notes] [--user|--project] [--template]\n\n" +
+			usage: "Usage: git-attributed install-hooks [--agent AGENTS] [--git] [--local-notes] [--user|--project] [--template]\n\n" +
 				"Merge managed hooks without replacing existing configuration.\n" +
+				"AGENTS is claude, droid, codex, copilot, or devin, a comma-separated\n" +
+				"list of them, all, or none. The default is claude,droid.\n" +
 				"Git hooks share attribution notes on push unless --local-notes is set.\n" +
 				"--template manages Git hooks in the git-attributed Git template\n" +
 				"directory, so every new git init and git clone is attributed.",
@@ -163,8 +165,9 @@ func commands() []*command {
 		{
 			name:  "uninstall",
 			short: "remove managed hooks",
-			usage: "Usage: git-attributed uninstall [--agent droid|claude|all|none] [--git] [--user|--project] [--template]\n\n" +
-				"Remove only configuration managed by git-attributed.",
+			usage: "Usage: git-attributed uninstall [--agent AGENTS] [--git] [--user|--project] [--template]\n\n" +
+				"Remove only configuration managed by git-attributed. AGENTS takes the\n" +
+				"same values as install-hooks; the default is claude,droid.",
 			run: runUninstall,
 		},
 		{

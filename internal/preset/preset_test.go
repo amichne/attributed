@@ -38,7 +38,7 @@ func TestParseToolHooks(t *testing.T) {
 		},
 		{
 			name: "claude shell post", preset: "claude", author: model.AuthorAI, handled: true,
-			payload: `{"session_id":"session-1","tool_name":"Bash","model":"test-model"}`,
+			payload: `{"session_id":"session-1","transcript_path":"/tmp/s.jsonl","tool_name":"Bash","model":"test-model"}`,
 		},
 		{
 			name: "qualified droid create", preset: "droid", author: model.AuthorHuman, handled: true, paths: 1,
@@ -62,7 +62,7 @@ func TestParseToolHooks(t *testing.T) {
 		},
 		{
 			name: "claude write", preset: "claude", author: model.AuthorAI, handled: true, paths: 1,
-			payload: `{"session_id":"session-1","tool_name":"Write","tool_input":{"file_path":"a.go"}}`,
+			payload: `{"session_id":"session-1","transcript_path":"/tmp/s.jsonl","tool_name":"Write","tool_input":{"file_path":"a.go"}}`,
 		},
 		{
 			name: "unrelated event", preset: "droid", author: model.AuthorAI,

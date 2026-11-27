@@ -1,0 +1,1 @@
+{"sessionId":"04f7f19b-14ac-48c9-a645-0630a6190e5d","timestamp":1795820225996,"cwd":"/workspace/repo","toolCallId":"call_6yNn6L2Dtt0qHBv6ZV2O6msi","toolName":"bash","toolArgs":{"command":"ls","description":"List directory contents"},"toolResult":{"resultType":"success","textResultForLlm":"hello.txt\n"}}

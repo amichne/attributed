@@ -119,12 +119,15 @@ func TestInstallAllAgentsAndCustomHooksPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Changed) != 8 {
+	if len(result.Changed) != 11 {
 		t.Fatalf("Install changed = %v", result.Changed)
 	}
 	for _, path := range []string{
 		filepath.Join(root, ".factory", "hooks.json"),
 		filepath.Join(root, ".claude", "settings.json"),
+		filepath.Join(root, ".codex", "hooks.json"),
+		filepath.Join(root, ".github", "hooks", "git-attributed.json"),
+		filepath.Join(root, ".devin", "hooks.v1.json"),
 		filepath.Join(root, ".hooks", "post-commit"),
 		filepath.Join(root, ".hooks", "pre-push"),
 	} {

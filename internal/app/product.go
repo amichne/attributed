@@ -36,6 +36,16 @@ func runCheckpoint(env *Env, command *command, args []string) (int, error) {
 	if done {
 		return code, err
 	}
+	code, err = captureCheckpoint(env, command, parsed)
+	if err != nil && preset.DeniesOnHookError(parsed.presetName) {
+		// The agent would deny the tool call on a non-zero exit. The error is
+		// already on stderr; attribution never blocks an edit.
+		return ExitSuccess, nil
+	}
+	return code, err
+}
+
+func captureCheckpoint(env *Env, command *command, parsed checkpointArgs) (int, error) {
 	input, err := readCheckpointInput(env.Stdin)
 	if err != nil {
 		return operationalError(env, command.name, err)
@@ -444,7 +454,7 @@ func runUninstall(env *Env, command *command, args []string) (int, error) {
 func parseHookOptions(command *command, args []string) (hooks.Options, error) {
 	flags := flag.NewFlagSet(command.name, flag.ContinueOnError)
 	flags.SetOutput(new(strings.Builder))
-	agent := flags.String("agent", "all", "droid, claude, all, or none")
+	agent := flags.String("agent", "claude,droid", "claude, droid, codex, copilot, devin, a comma-separated list, all, or none")
 	gitHook := flags.Bool("git", false, "manage Git attribution hooks")
 	localNotes := flags.Bool("local-notes", false, "disable automatic attribution note sharing")
 	user := flags.Bool("user", false, "use user agent configuration")
@@ -462,10 +472,8 @@ func parseHookOptions(command *command, args []string) (hooks.Options, error) {
 	if !*user && !*project {
 		*project = true
 	}
-	switch *agent {
-	case "droid", "claude", "all", "none":
-	default:
-		return hooks.Options{}, fmt.Errorf("unsupported agent %q", *agent)
+	if _, err := hooks.SelectAgents(*agent); err != nil {
+		return hooks.Options{}, err
 	}
 	if *agent == "none" && !*gitHook {
 		return hooks.Options{}, errors.New("select an agent or --git")

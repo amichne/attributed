@@ -1,0 +1,1 @@
+{"hook_event_name":"PreToolUse","session_id":"04f7f19b-14ac-48c9-a645-0630a6190e5d","timestamp":"2026-11-27T22:57:03.076Z","cwd":"/workspace/repo","tool_use_id":"custom_call_x072qHqob0ZBgC645YSAujN6","tool_name":"Edit","tool_input":"*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch\n"}

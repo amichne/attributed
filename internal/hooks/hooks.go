@@ -260,16 +260,16 @@ func changeSelectedAgentConfigs(
 	}
 	var changed []string
 	for _, agent := range agents {
-		path, err := agentConfigPath(root, agent, options.User)
+		file, err := agentConfigFile(root, agent, options.User)
 		if err != nil {
 			return nil, err
 		}
-		didChange, err := changeAgentConfig(path, agent, agentExecutable, install)
+		didChange, err := changeAgentFile(file, agent, agentExecutable, install)
 		if err != nil {
 			return nil, err
 		}
 		if didChange {
-			changed = append(changed, path)
+			changed = append(changed, file.path)
 		}
 	}
 	return changed, nil
@@ -430,17 +430,6 @@ esac`
 }
 
 const referenceTransactionNestedGuard = "if [ -n \"${GIT_ATTRIBUTED_NESTED:-}\" ]; then\n  exit 0\nfi\n"
-
-func selectedAgents(value string) []string {
-	switch value {
-	case "all":
-		return []string{"claude", "droid"}
-	case "droid", "claude":
-		return []string{value}
-	default:
-		return nil
-	}
-}
 
 // ManagedTemplateDir returns the managed Git template directory under the
 // trusted config base, so callers outside this package can recognize an
@@ -1281,36 +1270,23 @@ func removeEmptyTemplateRoot() (err error) {
 }
 
 func agentConfigPath(root, agent string, user bool) (string, error) {
-	base := root
-	if user {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home directory: %w", err)
-		}
-		base = home
-	}
-	var path string
-	switch agent {
-	case "droid":
-		path = filepath.Join(base, ".factory", "hooks.json")
-	case "claude":
-		path = filepath.Join(base, ".claude", "settings.json")
-	default:
-		return "", fmt.Errorf("unsupported agent %q", agent)
-	}
-	if err := rejectSymlinkPath(base, filepath.Dir(path)); err != nil {
-		return "", err
-	}
-	return path, nil
+	file, err := agentConfigFile(root, agent, user)
+	return file.path, err
 }
 
+// changeAgentConfig changes a Claude Code or Factory hook file at path.
 func changeAgentConfig(path, agent, executable string, install bool) (bool, error) {
+	return changeAgentFile(agentFile{path: path, nested: agent == "claude"}, agent, executable, install)
+}
+
+func changeAgentFile(file agentFile, agent, executable string, install bool) (bool, error) {
+	path := file.path
 	config, mode, existed, err := readJSONObject(path)
 	if err != nil {
 		return false, err
 	}
 	eventConfig := config
-	nested := agent == "claude"
+	nested := file.nested
 	if nested {
 		value := config["hooks"]
 		if value == nil {
@@ -1324,9 +1300,21 @@ func changeAgentConfig(path, agent, executable string, install bool) (bool, erro
 		}
 	}
 	specs := agentSpecs(agent, executable)
-	changed, err := updateAgentEvents(eventConfig, specs, install)
+	format := entryFormat(groupedEntries{})
+	if file.copilot {
+		format = copilotEntries{}
+	}
+	changed, err := updateAgentEvents(eventConfig, specs, install, format)
 	if err != nil {
 		return false, fmt.Errorf("update hooks in %s: %w", path, err)
+	}
+	if file.copilot && install {
+		if version, ok := config["version"]; !ok {
+			config["version"] = 1
+			changed = true
+		} else if fmt.Sprint(version) != "1" {
+			return false, fmt.Errorf("read %s: version %v is not 1", path, version)
+		}
 	}
 	if nested {
 		if len(eventConfig) == 0 {
@@ -1336,7 +1324,7 @@ func changeAgentConfig(path, agent, executable string, install bool) (bool, erro
 		}
 	} else if agent == "droid" {
 		if legacy, ok := config["hooks"].(map[string]any); ok {
-			legacyChanged, err := updateAgentEvents(legacy, specs, false)
+			legacyChanged, err := updateAgentEvents(legacy, specs, false, groupedEntries{})
 			if err != nil {
 				return false, fmt.Errorf("update legacy hooks in %s: %w", path, err)
 			}
@@ -1354,6 +1342,12 @@ func changeAgentConfig(path, agent, executable string, install bool) (bool, erro
 		return false, nil
 	}
 	if existed {
+		if file.owned && !install && ownedConfigEmpty(config) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("remove %s: %w", path, err)
+			}
+			return true, nil
+		}
 		var backupErr error
 		if install {
 			backupErr = refreshBackup(path, mode)
@@ -1378,7 +1372,7 @@ func changeAgentConfig(path, agent, executable string, install bool) (bool, erro
 	return true, nil
 }
 
-func updateAgentEvents(eventConfig map[string]any, specs map[string][]hookSpec, install bool) (bool, error) {
+func updateAgentEvents(eventConfig map[string]any, specs map[string][]hookSpec, install bool, format entryFormat) (bool, error) {
 	changed := false
 	for event, eventSpecs := range specs {
 		values, err := objectArray(eventConfig[event])
@@ -1387,7 +1381,7 @@ func updateAgentEvents(eventConfig map[string]any, specs map[string][]hookSpec, 
 		}
 		for _, spec := range eventSpecs {
 			var specChanged bool
-			values, specChanged, err = updateAgentEvent(values, spec, install)
+			values, specChanged, err = updateAgentEvent(values, spec, install, format)
 			if err != nil {
 				return false, fmt.Errorf("update %s: %w", event, err)
 			}
@@ -1404,13 +1398,13 @@ func updateAgentEvents(eventConfig map[string]any, specs map[string][]hookSpec, 
 	return changed, nil
 }
 
-func updateAgentEvent(values []any, spec hookSpec, install bool) ([]any, bool, error) {
+func updateAgentEvent(values []any, spec hookSpec, install bool, format entryFormat) ([]any, bool, error) {
 	filtered := make([]any, 0, len(values)+1)
 	found := false
 	changed := false
 	for _, value := range values {
 		if install && !found {
-			updated, managed, current := updateManagedHook(value, spec)
+			updated, managed, current := format.update(value, spec)
 			if managed {
 				filtered = append(filtered, updated)
 				found = true
@@ -1420,7 +1414,7 @@ func updateAgentEvent(values []any, spec hookSpec, install bool) ([]any, bool, e
 				continue
 			}
 		}
-		remaining, removed, current := removeManagedHook(value, spec)
+		remaining, removed, current := format.remove(value, spec)
 		if removed {
 			if install && current && !found {
 				filtered = append(filtered, value)
@@ -1431,7 +1425,7 @@ func updateAgentEvent(values []any, spec hookSpec, install bool) ([]any, bool, e
 				filtered = append(filtered, remaining)
 			}
 			if install && !found {
-				filtered = append(filtered, managedEntry(spec))
+				filtered = append(filtered, format.entry(spec))
 				found = true
 			}
 			changed = true
@@ -1440,7 +1434,7 @@ func updateAgentEvent(values []any, spec hookSpec, install bool) ([]any, bool, e
 		filtered = append(filtered, value)
 	}
 	if install && !found {
-		filtered = append(filtered, managedEntry(spec))
+		filtered = append(filtered, format.entry(spec))
 		changed = true
 	}
 	if !install && len(filtered) != len(values) {
@@ -1510,36 +1504,27 @@ type hookSpec struct {
 }
 
 func agentSpecs(agent, executable string) map[string][]hookSpec {
-	var editMatcher string
-	switch agent {
-	case "droid":
-		editMatcher = "Edit|Create|ApplyPatch"
-	case "claude":
-		editMatcher = "Write|Edit|MultiEdit"
-	}
+	events := eventsFor(agent)
 	checkpoint := func(kind string) string {
 		return guardedAgentCommand(executable, quoteExecutable(executable)+
 			" checkpoint "+agent+" --managed-by git-attributed --type "+kind+" --hook-input stdin")
 	}
-	editPre := checkpoint("human")
-	editPost := checkpoint("ai")
-	shellMatcher := "Bash|Shell|RunCommand|run_command|Execute|execute_command|Terminal"
-	shellPre := checkpoint("human")
-	shellPost := checkpoint("ai")
+	before := checkpoint("human")
+	after := checkpoint("ai")
 	return map[string][]hookSpec{
-		"PreToolUse": {{
-			matcher: editMatcher,
-			command: editPre,
+		events.pre: {{
+			matcher: events.editMatcher,
+			command: before,
 		}, {
-			matcher: shellMatcher,
-			command: shellPre,
+			matcher: events.shellMatch,
+			command: before,
 		}},
-		"PostToolUse": {{
-			matcher: editMatcher,
-			command: editPost,
+		events.post: {{
+			matcher: events.editMatcher,
+			command: after,
 		}, {
-			matcher: shellMatcher,
-			command: shellPost,
+			matcher: events.shellMatch,
+			command: after,
 		}},
 	}
 }
