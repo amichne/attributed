@@ -31,7 +31,7 @@ trap cleanup EXIT
 step "release build from HEAD"
 git clone --quiet "$ROOT" "$WORK/src"
 git -C "$WORK/src" tag "$TAG"
-(cd "$WORK/src" && HOMEBREW_TAP_TOKEN=unused goreleaser release --clean --skip=publish >"$WORK/goreleaser.log" 2>&1) ||
+(cd "$WORK/src" && HOMEBREW_TAP_DEPLOY_KEY=unused goreleaser release --clean --skip=publish >"$WORK/goreleaser.log" 2>&1) ||
   { cat "$WORK/goreleaser.log"; fail "goreleaser release"; }
 CASK="$WORK/src/dist/homebrew/Casks/git-attributed.rb"
 [ -f "$CASK" ] || fail "no cask generated"
