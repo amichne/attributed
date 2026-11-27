@@ -22,6 +22,7 @@ jobs:
     name: Release pull request
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     outputs:
@@ -33,6 +34,15 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Pushes made with GITHUB_TOKEN start no workflows, but a dispatch does,
+      # and its checks attach to the release pull request's head commit.
+      - name: Run CI on the release pull request
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
 
   publish:
     name: Publish ${{ needs.release-please.outputs.tag_name }}
@@ -51,7 +61,7 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "::error::Set HOMEBREW_TAP_TOKEN, then re-run this job."
+            echo "::error::Set HOMEBREW_TAP_TOKEN to a token with Contents write on amichne/homebrew-tap, then re-run this job."
             exit 1
           fi
 
