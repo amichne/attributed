@@ -63,13 +63,9 @@ Pull request titles follow [Conventional Commits](https://www.conventionalcommit
 
 ### Docs publishing
 
-The Documentation site workflow exports `docs/` with Mintlify and deploys
-the static site to [attributed.michne.com](https://attributed.michne.com)
-when docs or workflow changes reach `main`. Pull requests build the same
-Pages artifact. To rebuild manually, run the workflow on `main`.
-
-GitHub CI validates the Mintlify build and internal links. Mintlify separately publishes
-from `docs/` on `main` through its GitHub integration. Check the commit in
+Mintlify publishes `docs/` from `main` to
+[attributed.michne.com](https://attributed.michne.com) through its GitHub
+integration. GitHub CI validates the Mintlify build and internal links. Check the commit in
 [Mintlify Publishes](https://dashboard.mintlify.com/attributed) and confirm the
 changed pages on the live site. If a docs commit never starts a build, check
 the Mintlify GitHub App's access to `amichne/attributed` in Git Settings.
