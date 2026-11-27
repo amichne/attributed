@@ -1,10 +1,10 @@
 {
   "files": {
     "LICENSE": "5739e47ce8e4f54a80975ce5335ab2e56b078e2558d27eab6556650fe032c69a",
-    "commands/git-attributed-setup.toml": "6b1d43bed6d67efceaddc5c9bc95007596504b8c7a937baecd053332bf660570",
+    "commands/git-attributed-setup.toml": "10b063ea2380b5005b4534bafdf51d6268158d54feb767ebf857639f950b9d64",
     "gemini-extension.json": "d37c7213681cfa71ed62d62edb6b6dcb43f41a8526a50a25b997b981eeb8b349"
   },
   "pkl": "0.33.0",
-  "sourceSha": "95f91c58fdd27c2fea9e251c2733f46108433e0574f061456b13c6b32076a3dd",
+  "sourceSha": "aabb11dd4b723fbe7b9ca8da254c89853c62383cf4d0576d746b1f744942e700",
   "version": 1
 }
