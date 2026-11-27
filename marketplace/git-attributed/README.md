@@ -8,8 +8,13 @@ Claude Code and Factory.
 
 ## Quick start
 
-Install the binary with Go 1.24 or later and put `$(go env GOPATH)/bin` on
-`PATH`:
+Install the binary:
+
+```sh
+brew install amichne/tap/git-attributed
+```
+
+Or build it with Go 1.24 or later and put `$(go env GOPATH)/bin` on `PATH`:
 
 ```sh
 go install github.com/amichne/attributed/cmd/git-attributed@latest
@@ -38,5 +43,5 @@ git attributed status
   `--local-notes`.
 
 Hooks skip silently on machines without the binary. See the
-[documentation](https://attributed.mintlify.app) for what Attributed writes
+[documentation](https://attributed.michne.com) for what Attributed writes
 to Git and what it guarantees.

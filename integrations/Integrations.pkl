@@ -48,7 +48,7 @@ harnesses {
 plugin {
   name = "git-attributed"
   description = "Install and use local human and AI line attribution"
-  version = "1.8.0"
+  version = "0.1.0" // x-release-please-version
   author = "Austin Michne"
   homepage = "https://github.com/amichne/attributed"
   repository = "https://github.com/amichne/attributed"

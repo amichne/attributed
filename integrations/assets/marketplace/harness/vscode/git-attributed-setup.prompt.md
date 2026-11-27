@@ -24,9 +24,10 @@ Windows PowerShell:
 $binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-If it is missing, stop. Tell the user to install it with Go 1.24 or later,
-`go install github.com/amichne/attributed/cmd/git-attributed@latest`, put
-`$(go env GOPATH)/bin` on `PATH`, and rerun this command. Run the remaining commands through the absolute
+If it is missing, stop. Tell the user to install it with
+`brew install amichne/tap/git-attributed`, or with Go 1.24 or later through
+`go install github.com/amichne/attributed/cmd/git-attributed@latest` with
+`$(go env GOPATH)/bin` on `PATH`, then rerun this command. Run the remaining commands through the absolute
 `$binary` path, so setup does not depend on this process reloading `PATH`.
 Verify `$binary version`.
 
