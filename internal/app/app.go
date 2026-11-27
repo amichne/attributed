@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/amichne/attributed"
 	"github.com/amichne/attributed/internal/gitcmd"
 	"github.com/amichne/attributed/internal/model"
 	"github.com/amichne/attributed/internal/runner"
@@ -228,6 +229,14 @@ func commands() []*command {
 			run: runUpdate,
 		},
 		{
+			name:  "license",
+			short: "show the license notices for this binary",
+			usage: "Usage: git-attributed license\n\n" +
+				"Print the MIT notices that cover this binary: Attributed's own and\n" +
+				"the notice of git-byline, the upstream source it derives from.",
+			run: runLicense,
+		},
+		{
 			name:  "help",
 			short: "show help for a command",
 			usage: "Usage: git-attributed help [command]\n\n" +
@@ -349,6 +358,19 @@ func runHelp(env *Env, c *command, args []string) (int, error) {
 	default:
 		return commandUsageError(env, c, errors.New("help takes at most one command"))
 	}
+}
+
+// runLicense implements the license command.
+func runLicense(env *Env, c *command, args []string) (int, error) {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprintln(env.Stdout, c.usage)
+		return ExitSuccess, nil
+	}
+	if len(args) > 0 {
+		return commandUsageError(env, c, fmt.Errorf("license takes no arguments, got %q", args[0]))
+	}
+	fmt.Fprint(env.Stdout, attributed.Notices())
+	return ExitSuccess, nil
 }
 
 // versionJSON is the machine-readable form of the version command.

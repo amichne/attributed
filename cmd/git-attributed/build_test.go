@@ -56,4 +56,20 @@ func TestBuildSmoke(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Errorf("version stderr = %q, want it empty", stderr.String())
 	}
+
+	// The MIT notices must ship inside the distributed binary itself.
+	notices := exec.Command(bin, "license")
+	out, err := notices.Output()
+	if err != nil {
+		t.Fatalf("built binary license: %v", err)
+	}
+	for _, want := range []string{
+		"Copyright (c) 2026 Austin Michne",
+		"Copyright (c) 2026 Comarch S.A.",
+		"THE SOFTWARE IS PROVIDED \"AS IS\"",
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Errorf("license output does not contain %q", want)
+		}
+	}
 }

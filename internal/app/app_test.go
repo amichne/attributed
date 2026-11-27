@@ -143,6 +143,30 @@ var runCases = []runCase{
 		stdout: "Usage: git-attributed update", noStderr: true,
 	},
 	{
+		name:   "license prints the upstream MIT notice and exits 0",
+		args:   []string{"license"},
+		code:   ExitSuccess,
+		stdout: "Copyright (c) 2026 Comarch S.A.", noStderr: true,
+	},
+	{
+		name:   "license prints the Attributed MIT notice",
+		args:   []string{"license"},
+		code:   ExitSuccess,
+		stdout: "Copyright (c) 2026 Austin Michne", noStderr: true,
+	},
+	{
+		name:   "license help flag prints usage on stdout and exits 0",
+		args:   []string{"license", "-h"},
+		code:   ExitSuccess,
+		stdout: "Usage: git-attributed license", noStderr: true,
+	},
+	{
+		name:   "license with an argument exits 2",
+		args:   []string{"license", "extra"},
+		code:   ExitUsage,
+		stderr: `license takes no arguments, got "extra"`, noStdout: true,
+	},
+	{
 		name:   "unknown command exits 2 with usage on stderr",
 		args:   []string{"bogus"},
 		code:   ExitUsage,
