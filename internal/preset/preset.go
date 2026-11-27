@@ -42,7 +42,21 @@ func Parse(name string, explicit model.Author, input io.Reader) (event Event, ha
 	case "droid":
 		return parseToolHook("droid", explicit, data, []string{"Edit", "Create", "ApplyPatch"})
 	case "claude":
+		claudeCode, err := fromClaudeCode(data)
+		if err != nil {
+			return Event{}, false, err
+		}
+		if !claudeCode {
+			// Another agent ran Claude Code's hooks; its own hooks record it.
+			return Event{}, false, nil
+		}
 		return parseToolHook("claude", explicit, data, []string{"Write", "Edit", "MultiEdit"})
+	case "codex":
+		return parseCodex(explicit, data)
+	case "copilot":
+		return parseCopilot(explicit, data)
+	case "devin":
+		return parseDevin(explicit, data)
 	case "agent-v1":
 		if explicit != "" {
 			return Event{}, false, errors.New("agent-v1 takes type from its payload")
@@ -421,6 +435,7 @@ func parsePortableHook(agent string, explicit model.Author, data []byte) (Event,
 			Patch                string   `json:"patch"`
 			PatchText            string   `json:"patchText"`
 			Input                string   `json:"input"`
+			Command              string   `json:"command"`
 			FilePaths            []string `json:"file_paths"`
 			FilePathsCamel       []string `json:"filePaths"`
 			EditedFilepaths      []string `json:"edited_filepaths"`
@@ -436,13 +451,13 @@ func parsePortableHook(agent string, explicit model.Author, data []byte) (Event,
 		paths = append(paths, input.EditedFilepaths...)
 		paths = append(paths, input.EditedFilepathsCamel...)
 		paths = append(paths, input.Files...)
-		// Factory puts the ApplyPatch body in input and OpenCode puts it in
-		// patchText; patch covers other surfaces. Only ApplyPatch tools may use
-		// those fields as the patch body: ordinary tools can carry unrelated
-		// text in them that is not a patch.
+		// Factory puts the ApplyPatch body in input, OpenCode in patchText,
+		// and Codex in command; patch covers other surfaces. Only ApplyPatch
+		// tools may use those fields as the patch body: ordinary tools can
+		// carry unrelated text in them that is not a patch.
 		patch := input.Patch
 		if applyPatch {
-			patch = firstValue(input.Patch, input.PatchText, input.Input)
+			patch = firstValue(input.Patch, input.PatchText, input.Input, input.Command)
 		}
 		if patch != "" {
 			patchBodyFound = true
