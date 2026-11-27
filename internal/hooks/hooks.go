@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -193,6 +194,9 @@ func hookExecutable(install bool) (string, error) {
 	if !install {
 		return productName, nil
 	}
+	if invoked, ok := invokedExecutable(os.Args[0], exec.LookPath, os.Executable); ok {
+		return invoked, nil
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve git-attributed executable: %w", err)
@@ -202,6 +206,41 @@ func hookExecutable(install bool) (string, error) {
 		return "", fmt.Errorf("resolve absolute executable path: %w", err)
 	}
 	return executable, nil
+}
+
+// invokedExecutable returns the absolute path the binary was started
+// through, without resolving symlinks. Package managers such as Homebrew put
+// a stable symlink on PATH that points into a versioned directory, which an
+// upgrade deletes. os.Executable resolves that symlink on Linux, so hooks
+// would keep the versioned path and go quiet after an upgrade. The invoked
+// path is used only when it names the same file as the running executable.
+func invokedExecutable(
+	arg0 string,
+	lookPath func(string) (string, error),
+	executable func() (string, error),
+) (string, bool) {
+	candidate := arg0
+	if !strings.ContainsRune(arg0, '/') {
+		found, err := lookPath(arg0)
+		if err != nil {
+			return "", false
+		}
+		candidate = found
+	}
+	candidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	running, err := executable()
+	if err != nil {
+		return "", false
+	}
+	invokedInfo, invokedErr := os.Stat(candidate)
+	runningInfo, runningErr := os.Stat(running)
+	if invokedErr != nil || runningErr != nil || !os.SameFile(invokedInfo, runningInfo) {
+		return "", false
+	}
+	return candidate, true
 }
 
 func changeSelectedAgentConfigs(

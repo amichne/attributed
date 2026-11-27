@@ -90,6 +90,40 @@ jobs:
       - name: Projected integrations match their source
         run: uv run --locked --script tools/projection/project.py check
 
+  cask:
+    name: Homebrew cask on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.20.3
+          install-only: true
+
+      - name: Put Homebrew on PATH
+        if: runner.os == 'Linux'
+        run: echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+
+      - name: Install the cask from a local mirror
+        run: bash scripts/cask-smoke.sh
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

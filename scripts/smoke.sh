@@ -372,5 +372,22 @@ NEXT_OUT="$(git -C "$QUIET" commit -qam three 2>&1)" || fail "commit after resum
 case "$NEXT_OUT" in *resuming*) fail "resumed twice: $NEXT_OUT" ;; esac
 (cd "$QUIET" && "$MOVABLE" verify >/dev/null) || fail "verify after resuming"
 
+step "hooks keep a package manager's stable symlink"
+# Homebrew links bin/git-attributed to a versioned directory that an upgrade
+# deletes. Hooks must record the symlink, not the versioned target.
+VERSIONED="$WORK/brew/Cellar/git-attributed/0.1.0/bin/git-attributed"
+STABLE="$WORK/brew/bin/git-attributed"
+mkdir -p "$(dirname "$VERSIONED")" "$(dirname "$STABLE")"
+cp "$BIN" "$VERSIONED"
+ln -s "$VERSIONED" "$STABLE"
+LINKED="$WORK/linked"
+git init -q "$LINKED"
+(cd "$LINKED" && PATH="$(dirname "$STABLE"):$PATH" git attributed install-hooks --agent none --git --local-notes >/dev/null) ||
+  fail "install-hooks through a symlink"
+grep -q "'$STABLE'" "$LINKED/.git/hooks/post-commit" || fail "post-commit does not use the stable symlink"
+if grep -q "Cellar" "$LINKED/.git/hooks/post-commit"; then
+  fail "post-commit recorded the versioned path"
+fi
+
 echo
 echo "SMOKE OK"

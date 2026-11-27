@@ -13,13 +13,19 @@ Agent hooks snapshot each file before and after the agent edits it. When you com
 
 ## Install
 
-Go 1.24 or later, on Linux or macOS:
+On macOS or Linux:
+
+```bash
+brew install amichne/tap/git-attributed
+```
+
+Or build it with Go 1.24 or later and put `$(go env GOPATH)/bin` on `PATH`:
 
 ```bash
 go install github.com/amichne/attributed/cmd/git-attributed@latest
 ```
 
-Put `$(go env GOPATH)/bin` on `PATH`. Git then runs the binary as `git attributed`.
+Git runs the binary as `git attributed`. Release archives and their checksums are on the [releases page](https://github.com/amichne/attributed/releases), and the docs explain [installing through a Homebrew mirror](https://attributed.mintlify.app/#install-through-a-homebrew-mirror).
 
 ## Quick start
 
@@ -50,6 +56,8 @@ Unobserved lines count as the commit author's, and the docs list the other rough
 go test ./...
 go build -o git-attributed ./cmd/git-attributed && ATTRIBUTED_BIN=./git-attributed bash scripts/smoke.sh
 ```
+
+Pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`). [release-please](https://github.com/googleapis/release-please) reads them on `main` to keep a release pull request with the next version and `CHANGELOG.md`; merging it publishes the release, and GoReleaser builds the archives and updates the Homebrew cask. `bash scripts/cask-smoke.sh` installs that cask from a local mirror.
 
 `marketplace/` and `commands/` are generated from `integrations/`. Edit the source, then regenerate as the [projection guide](docs/extraction.mdx#project-harness-integrations) describes. `vhs docs/assets/blame.tape` re-records the demo.
 
