@@ -56,6 +56,13 @@ plugin {
   keywords { "git"; "attribution"; "ai"; "provenance" }
 }
 
+marketplace {
+  name = "attributed"
+  description = "Local human and AI line attribution for Git"
+  owner = "Austin Michne"
+  category = "developer-tools"
+}
+
 assets {
   "commands/git-attributed-setup.toml"
   "marketplace/git-attributed/README.md"

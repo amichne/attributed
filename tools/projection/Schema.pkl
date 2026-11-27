@@ -310,6 +310,17 @@ class Plugin {
       }
 }
 
+/// The marketplace listing that names the plugin on the Claude Code and
+/// Factory provider branches.
+class Marketplace {
+  name: String(matches(Regex(#"[a-z][a-z0-9-]*"#)))
+  description: String(!isEmpty)
+  owner: String(!isEmpty)
+  category: String(matches(Regex(#"[a-z][a-z0-9-]*"#)))
+}
+
+marketplace: Marketplace
+
 /// A repository-relative path of a file copied from `integrations/assets/`.
 typealias AssetPath = String(matches(Regex(#"(marketplace|commands)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+"#)))
 

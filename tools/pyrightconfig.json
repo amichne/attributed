@@ -1,7 +1,8 @@
 {
-  "include": ["projection", "toolchain", "upstream-import"],
+  "include": ["projection", "publish", "toolchain", "upstream-import"],
   "executionEnvironments": [
     { "root": "projection", "extraPaths": ["projection"] },
+    { "root": "publish", "extraPaths": ["publish"] },
     { "root": "toolchain", "extraPaths": ["toolchain"] },
     { "root": "upstream-import", "extraPaths": ["upstream-import"] }
   ],

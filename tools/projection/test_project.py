@@ -11,13 +11,23 @@ from pathlib import Path
 import pytest
 
 import project as subject
-from project import Frozen, PlannedFile, Rejected
+from project import Frozen, Plan, PlannedFile, ProviderFile, Rejected
 
 REPO = Path(__file__).resolve().parents[2]
+NO_PROVIDERS: dict[str, tuple[ProviderFile, ...]] = {name: () for name in subject.PROVIDERS}
 
 
 def planned(path: str, text: str = "x\n", seals: tuple[str, ...] = ()) -> PlannedFile:
     return PlannedFile(path, text, seals)
+
+
+def plan(*files: PlannedFile, **providers: tuple[ProviderFile, ...]) -> Plan:
+    return Plan(files, NO_PROVIDERS | providers)
+
+
+def raw_plan(files: list[object], providers: object | None = None) -> str:
+    default: dict[str, list[object]] = {name: [] for name in subject.PROVIDERS}
+    return json.dumps({"files": files, "providers": default if providers is None else providers})
 
 
 def rejected_code(error: pytest.ExceptionInfo[Rejected]) -> tuple[str, str]:
@@ -42,9 +52,12 @@ def test_safe_path_rejects_escapes_and_foreign_roots(path: str) -> None:
     [
         "not json",
         "[]",
-        '{"files": [], "extra": 1}',
-        '{"files": [{"path": "marketplace/a", "text": "x"}]}',
-        '{"files": [{"path": "marketplace/a", "text": "x", "seals": [1]}]}',
+        '{"files": [], "providers": {}, "extra": 1}',
+        '{"files": []}',
+        raw_plan([{"path": "marketplace/a", "text": "x"}]),
+        raw_plan([{"path": "marketplace/a", "text": "x", "seals": [1]}]),
+        raw_plan([], {"claude": [], "factory": []}),
+        raw_plan([], {"claude": [{"path": "a"}], "factory": [], "gemini": []}),
     ],
 )
 def test_parse_plan_rejects_malformed_plans(raw: str) -> None:
@@ -53,33 +66,38 @@ def test_parse_plan_rejects_malformed_plans(raw: str) -> None:
     assert rejected_code(error) == ("validate", "INVALID_PLAN")
 
 
-def test_parse_plan_reads_files_in_order() -> None:
-    raw = json.dumps(
-        {"files": [{"path": "marketplace/a", "text": "t", "seals": ["marketplace/b"]}]}
+def test_parse_plan_reads_files_and_providers_in_order() -> None:
+    raw = raw_plan(
+        [{"path": "marketplace/a", "text": "t", "seals": ["marketplace/b"]}],
+        {"claude": [{"path": "x/y", "text": "z"}], "factory": [], "gemini": []},
     )
-    assert subject.parse_plan(raw) == [planned("marketplace/a", "t", ("marketplace/b",))]
+    assert subject.parse_plan(raw) == plan(
+        planned("marketplace/a", "t", ("marketplace/b",)),
+        claude=(ProviderFile("x/y", "z"),),
+    )
 
 
 @pytest.mark.parametrize(
-    ("files", "code"),
+    ("candidate", "code"),
     [
-        ([planned(subject.LOCK_PATH)], "UNSAFE_PATH"),
-        ([planned("elsewhere/a")], "UNSAFE_PATH"),
-        ([planned("marketplace/a"), planned("marketplace/a")], "DUPLICATE_PATH"),
+        (plan(planned(subject.LOCK_PATH)), "UNSAFE_PATH"),
+        (plan(planned("elsewhere/a")), "UNSAFE_PATH"),
+        (plan(planned("marketplace/a"), planned("marketplace/a")), "DUPLICATE_PATH"),
+        (plan(claude=(ProviderFile("../escape", "x"),)), "UNSAFE_PATH"),
+        (plan(gemini=(ProviderFile(subject.PROVIDER_LOCK_PATH, "x"),)), "UNSAFE_PATH"),
+        (plan(factory=(ProviderFile("a", "x"), ProviderFile("a", "y"))), "DUPLICATE_PATH"),
     ],
 )
-def test_validate_plan_rejects_unsafe_or_duplicate_paths(
-    files: list[PlannedFile], code: str
-) -> None:
+def test_validate_plan_rejects_unsafe_or_duplicate_paths(candidate: Plan, code: str) -> None:
     with pytest.raises(Rejected) as error:
-        subject.validate_plan(files, Frozen({}))
+        subject.validate_plan(candidate, Frozen({}))
     assert rejected_code(error) == ("validate", code)
 
 
 def test_validate_plan_rejects_an_undeclared_asset() -> None:
     frozen = Frozen({"integrations/assets/marketplace/stray.md": b"x"})
     with pytest.raises(Rejected) as error:
-        subject.validate_plan([planned("marketplace/a")], frozen)
+        subject.validate_plan(plan(planned("marketplace/a")), frozen)
     assert rejected_code(error) == ("validate", "UNDECLARED_ASSET")
 
 
@@ -213,13 +231,49 @@ def sources(tmp_path: Path) -> Path:
 
 @requires_pkl
 def test_projection_matches_the_committed_tree(sources: Path) -> None:
-    tree = subject.project(sources, "pkl")
+    tree = subject.project(sources, "pkl").repository
     assert subject.drift(tree, subject.committed_tree(sources)) == []
 
 
 @requires_pkl
+def test_provider_trees_copy_the_projected_plugin(sources: Path) -> None:
+    projected = subject.project(sources, "pkl")
+    repository = projected.repository
+    for provider, manifest in (("claude", ".claude-plugin"), ("factory", ".factory-plugin")):
+        tree = projected.providers[provider]
+        listing = json.loads(tree[f"{manifest}/marketplace.json"])
+        assert listing["name"] == "attributed"
+        [entry] = listing["plugins"]
+        root = entry["source"].removeprefix("./")
+        assert root == "plugins/git-attributed"
+        for name in (
+            f"{manifest}/plugin.json",
+            "README.md",
+            "LICENSE",
+            "commands/git-attributed-setup.md",
+            "skills/git-attributed/SKILL.md",
+        ):
+            assert tree[f"{root}/{name}"] == repository[f"marketplace/git-attributed/{name}"]
+    gemini = projected.providers["gemini"]
+    assert json.loads(gemini["gemini-extension.json"])["name"] == "git-attributed"
+    assert (
+        gemini["commands/git-attributed-setup.toml"]
+        == repository["commands/git-attributed-setup.toml"]
+    )
+
+
+@requires_pkl
+def test_each_provider_tree_carries_a_complete_lock(sources: Path) -> None:
+    for tree in subject.project(sources, "pkl").providers.values():
+        lock = json.loads(tree[subject.PROVIDER_LOCK_PATH])
+        assert set(lock["files"]) == set(tree) - {subject.PROVIDER_LOCK_PATH}
+        for path, digest in lock["files"].items():
+            assert hashlib.sha256(tree[path]).hexdigest() == digest
+
+
+@requires_pkl
 def test_projection_seals_the_opencode_plugin_digest(sources: Path) -> None:
-    tree = subject.project(sources, "pkl")
+    tree = subject.project(sources, "pkl").repository
     plugin = tree["marketplace/harness/opencode/git-attributed.ts"]
     setup = tree["marketplace/harness/opencode/git-attributed-setup.md"].decode()
     assert setup.count(hashlib.sha256(plugin).hexdigest()) == 2
@@ -233,7 +287,7 @@ def test_a_changed_matcher_drifts_only_its_harness(sources: Path) -> None:
     source.write_text(
         text.replace('editMatcher = "write_file|replace"', 'editMatcher = "write_file"')
     )
-    tree = subject.project(sources, "pkl")
+    tree = subject.project(sources, "pkl").repository
     assert subject.drift(tree, subject.committed_tree(sources)) == [
         "changed marketplace/harness/gemini/settings.json",
         "changed marketplace/projection-lock.json",
