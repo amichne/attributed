@@ -5,10 +5,8 @@
 /git-attributed
 dist/
 
-# Documentation site dependencies, cache, and build output
-website/node_modules/
-website/.docusaurus/
-website/build/
+# Python bytecode from maintainer tools
+__pycache__/
 
 # Test and coverage artifacts
 *.test
