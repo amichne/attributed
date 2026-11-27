@@ -180,12 +180,14 @@ function buildPayload(
 // Hooks finish before OpenCode continues, so the pre-edit snapshot exists before
 // the tool writes and the post-edit snapshot exists before the next tool starts.
 // Failures are logged, and every process gets a bounded lifetime so a broken
-// hook cannot disrupt the session.
+// hook cannot disrupt the session. Without git-attributed on PATH, a rule
+// records nothing and stays silent.
 async function runRule(
   rule: OpenCodeHookRule,
   projectRoot: string,
   payload: string
 ): Promise<void> {
+  if (Bun.which(rule.command[0]) === null) return;
   try {
     const cwd = rule.cwd ? projectRoot + '/' + rule.cwd : projectRoot;
     const proc = Bun.spawn({
@@ -219,7 +221,7 @@ async function runRule(
   }
 }
 
-export const GitAttributedHooks =(context: OpenCodePluginContext) => {
+export const GitAttributedHooks = (context: OpenCodePluginContext) => {
   const projectRoot = context.worktree || context.directory;
   const compiled: OpenCodeCompiledRule[] = [];
   for (const rule of HOOK_RULES) {

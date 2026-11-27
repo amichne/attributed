@@ -5,26 +5,9 @@ description: "How Attributed imports git-byline, renames it, and narrows it in i
 keywords: ["git-attributed", "import", "rename", "projection"]
 ---
 
-Attributed starts from a reproducible import of the [pinned upstream tree](/baseline), not from a fork of its history. Each later slice changes one owner and keeps its own evidence. Run the [qualification plan](/qualification) checks that a slice affects before merging it.
+Attributed began as an import of the [pinned upstream tree](/baseline) in commit `11c6d61`, with every upstream name changed by the naming map below. It is not a fork of upstream's history. Each later slice changes one owner and keeps its own evidence.
 
-## Reproduce the import
-
-[`tools/upstream-import/import_upstream.py`](https://github.com/amichne/attributed/blob/main/tools/upstream-import/import_upstream.py) reads blobs from commit `d4260838249720bcea3a746cce809e5a1955248a`. It drops the excluded paths, applies the naming map to paths and content, and runs `gofmt`. It refuses an existing destination, a symlink or submodule entry, non-UTF-8 content, a rename collision, and any `byline` or `comarch` text that survives outside the files kept verbatim.
-
-Verify import commit `11c6d61` from the repository root with Git, `uv`, and `gofmt` on `PATH`:
-
-```sh
-work=$(mktemp -d)
-git clone --no-checkout https://github.com/comarch/git-byline.git "$work/upstream"
-uv run --locked --script tools/upstream-import/import_upstream.py "$work/upstream" "$work/import"
-mkdir "$work/tree" && git archive 11c6d61 | tar -x -C "$work/tree"
-diff -r -x .mintlify -x docs -x README.md -x LICENSE.upstream -x upstream-import \
-  "$work/import" "$work/tree" && echo MATCH
-```
-
-The excluded names are the files that existed before the import and the codemod itself. Two independent runs produced identical trees, and this check printed `MATCH`.
-
-### Paths left out
+## Paths left out
 
 | Group | Paths | Reason |
 | --- | --- | --- |
@@ -66,7 +49,7 @@ Attributed is MIT licensed. `LICENSE` holds the Attributed notice and `LICENSE.u
 
 | Order | Slice | Status | Decisive check |
 | --- | --- | --- | --- |
-| 1 | Import the pinned tree with the naming map | Done | Codemod output matches the import commit. All 22 packages and the 17-stage smoke suite pass. |
+| 1 | Import the pinned tree with the naming map | Done | All 22 packages and the 17-stage smoke suite passed at the import commit. |
 | 2 | Embed the license notices | Done | `go test ./...` passed 23 packages, 994 top-level tests, and 1,569 subtests, including the built-binary license check. |
 | 3 | Project harness integrations | Done | The projection reproduced every imported file except the corrected OpenCode checksum. `project.py check` passes on 24 files. |
 | 4 | Remove out-of-scope producers | Done | `go list -deps ./cmd/git-attributed` lists the 16-package candidate closure. Each removed test maps to a removed capability, and the 16-stage smoke suite passes. |

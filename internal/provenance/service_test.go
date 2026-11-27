@@ -755,6 +755,10 @@ func TestPendingRenameKeepsAttribution(t *testing.T) {
 	}
 }
 
+// TestDivergentHistoryFailsClosed moves HEAD to a line of history that no
+// longer contains the last annotated commit. Annotation must stop rather
+// than guess. A plain gap on the same line resumes instead; see
+// TestAnnotateResumesAfterMissedCommits.
 func TestDivergentHistoryFailsClosed(t *testing.T) {
 	t.Parallel()
 	root := testRepo(t)
@@ -769,9 +773,13 @@ func TestDivergentHistoryFailsClosed(t *testing.T) {
 	}
 	write(t, root, "file", "two\n")
 	commit(t, root, "two")
+	if _, err := Annotate(repo); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "reset", "--hard", "HEAD~1")
 	write(t, root, "file", "three\n")
 	commit(t, root, "three")
-	if _, err := Annotate(repo); err == nil || !strings.Contains(err.Error(), "gap") {
+	if _, err := Annotate(repo); err == nil || !strings.Contains(err.Error(), "divergent history") {
 		t.Fatalf("Annotate error = %v", err)
 	}
 }

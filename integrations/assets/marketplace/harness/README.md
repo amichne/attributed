@@ -2,9 +2,12 @@
 
 This directory carries the two files each agent needs, ready to copy.
 
-No Attributed release exists yet. Build `git-attributed` from source with
-Go 1.24 or later and put it on `PATH`. The setup commands find it there and
-stop if it is missing.
+Install `git-attributed` with Go 1.24 or later and put `$(go env GOPATH)/bin`
+on `PATH`. The setup commands find it there and stop if it is missing:
+
+```sh
+go install github.com/amichne/attributed/cmd/git-attributed@latest
+```
 
 ## Agents with a package
 
@@ -45,10 +48,8 @@ too, so merge the `hooks` block instead of replacing the file. Every other
 hook file in this table is complete and can be copied as is.
 
 OpenCode's plugin is documented for Linux, macOS, and WSL. Because OpenCode
-loads the plugin as code, its setup command downloads it from a release tag
-and checks its SHA-256 before it moves the file into `.opencode/plugins`.
-That download fails until a release exists, so copy the plugin from this
-directory until then.
+loads the plugin as code, its setup command checks the downloaded plugin's
+SHA-256 before it moves the file into `.opencode/plugins`.
 
 ## Why these files are safe to copy
 
@@ -62,7 +63,8 @@ Windsurf hooks run in the directory the agent starts them in. The OpenCode
 plugin uses its plugin context to resolve the project root.
 
 Each hook calls `git-attributed checkpoint portable-<agent> --hook-input stdin`,
-which records a snapshot before and after an edit. OpenCode's generated plugin
+which records a snapshot before and after an edit. When `git-attributed` is
+not on `PATH`, every hook exits 0 without output, so the agent keeps working. OpenCode's generated plugin
 also observes `apply_patch` and Bash calls, and waits for each checkpoint
 before OpenCode continues. Without the agent hook, git-attributed still annotates
 commits, but agent edits arrive as plain `human` lines instead of `ai` lines,

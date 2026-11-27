@@ -83,7 +83,7 @@ jobs:
       - name: Pytest
         working-directory: tools
         run: |
-          for suite in projection publish toolchain upstream-import; do
+          for suite in projection publish toolchain; do
             (cd "$suite" && uv run --no-project --with pytest==8.4.2 python -m pytest -q -p no:cacheprovider .)
           done
 

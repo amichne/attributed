@@ -1,43 +1,42 @@
 # git-attributed plugin
 
-Know which committed lines came from humans and AI without sending code,
-prompts, or transcripts to a separate analytics service. Attribution notes
-follow ordinary pushes to the selected Git remote by default.
+Record which committed lines an AI agent wrote, in Git notes beside your
+history. Nothing leaves your machine except the notes ref on your own pushes.
 
-This Factory plugin installs and configures git-attributed without a manual binary
-installation step.
+This plugin adds `/git-attributed-setup` and a `git-attributed` skill to
+Claude Code and Factory.
 
 ## Quick start
 
-```text
-droid plugin marketplace add amichne/attributed
-droid plugin install git-attributed@git-attributed --scope user
+Install the binary with Go 1.24 or later and put `$(go env GOPATH)/bin` on
+`PATH`:
+
+```sh
+go install github.com/amichne/attributed/cmd/git-attributed@latest
 ```
 
-Start Droid in a Git repository and run `/git-attributed-setup`. Then work
-normally and inspect a committed file:
+Then add the marketplace and the plugin. For Claude Code:
+
+```sh
+claude plugin marketplace add 'https://github.com/amichne/attributed.git#harness/claude'
+claude plugin install git-attributed@attributed
+```
+
+Start the agent in a Git repository and run `/git-attributed-setup`. After
+your next commit:
 
 ```sh
 git attributed blame path/to/file
-git attributed dashboard
 git attributed status
 ```
 
-## Capabilities
+## What setup does
 
-- `/git-attributed-setup` selects the operating-system installer.
-- Release archives are verified against `checksums.txt`.
-- Binary version is checked before installation.
-- Local agent and Git hooks are activated without replacing unrelated config.
-- The `git-attributed` skill documents status, blame, and local dashboard
-  workflows.
+- Finds `git-attributed` on `PATH` and stops if it is missing.
+- Adds agent and Git hooks without replacing your own hook code.
+- Shares `refs/notes/attributed` on ordinary pushes, unless you choose
+  `--local-notes`.
 
-The plugin setup installs a local runtime because Git hooks must keep working
-outside an active Factory session. No daemon, account, telemetry, or cloud
-storage is added. Git hook installation publishes attribution notes on
-ordinary pushes by default. Use `--local-notes` to disable automatic note
-sharing. Users can still push the notes ref explicitly.
-
-See the [product overview](https://github.com/amichne/attributed),
-[installation guide](https://github.com/amichne/attributed/blob/main/docs/INSTALL.md),
-and [security model](https://github.com/amichne/attributed/blob/main/docs/SECURITY_MODEL.md).
+Hooks skip silently on machines without the binary. See the
+[documentation](https://attributed.mintlify.app) for what Attributed writes
+to Git and what it guarantees.

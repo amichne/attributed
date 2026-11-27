@@ -1,0 +1,62 @@
+---
+title: "How Attributed uses Git"
+sidebarTitle: "Native Git"
+description: "Every ref, file, and hook Attributed touches, and how to read, share, or remove them with plain Git."
+keywords: ["git notes", "hooks", "refs"]
+---
+
+Attributed stores everything in your repository with ordinary Git objects, refs, and hooks. It has no database, daemon, or service. Plain Git can read, share, or delete all of it.
+
+## What it writes
+
+| Where | What | Leaves your machine |
+| --- | --- | --- |
+| `refs/notes/attributed` | One JSON note per commit with the attributed line ranges | Yes, with pushes, unless you install with `--local-notes` |
+| `refs/notes/attributed-stash` and `refs/notes/attributed-stash-owner` | Attribution for stashed work | No |
+| `refs/worktree/attributed/checkpoints` | Keeps the snapshot blobs of uncommitted agent edits reachable | No |
+| `refs/worktree/attributed/remote-notes` | Remote notes fetched while a push merges them, removed afterward | No |
+| `attributed/` in each worktree's Git directory | `checkpoints.jsonl` holds pending edit evidence, and `state.json` holds the last annotated commit | No |
+
+A note contains repository paths, line ranges, agent and model names, human identity tokens, session identifiers, timestamps, and blob IDs. It never contains prompts or transcripts.
+
+## Hooks it installs
+
+`install-hooks --git` adds a marked block to each Git hook below. Your own code in the same hook file keeps running. When the block changes an existing hook, the previous version is saved beside it as `<hook>.git-attributed.bak`.
+
+| Hook | Purpose |
+| --- | --- |
+| `post-commit` | Annotates the new commit |
+| `post-merge` | Annotates merge commits |
+| `post-rewrite` | Carries attribution through amend and rebase |
+| `post-checkout` | Follows branch switches |
+| `reference-transaction` | Follows ref moves outside commits, such as `git reset` and `git stash` |
+| `pre-push` | Merges and pushes `refs/notes/attributed`. `--local-notes` skips it |
+
+Agent hooks go in the agent's own config, `.claude/settings.json` for Claude Code or `.factory/hooks.json` for Factory. Pass `--user` to write your user-level config instead of the project's.
+
+## Use plain Git
+
+Read a commit's note:
+
+```bash
+git notes --ref=attributed show HEAD
+git log --notes=attributed -3
+```
+
+Share and fetch notes by hand:
+
+```bash
+git push origin refs/notes/attributed
+git fetch origin refs/notes/attributed:refs/notes/attributed
+```
+
+Remove Attributed. The first command removes only its hook blocks and agent entries. The rest delete its data:
+
+```bash
+git attributed uninstall --agent all --git
+git update-ref -d refs/notes/attributed
+git update-ref -d refs/worktree/attributed/checkpoints
+rm -rf "$(git rev-parse --git-dir)/attributed"
+```
+
+After uninstalling, the notes stay readable with `git notes` until you delete the ref.

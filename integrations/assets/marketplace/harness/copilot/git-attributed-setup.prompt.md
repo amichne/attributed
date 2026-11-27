@@ -10,7 +10,6 @@ Activate git-attributed attribution hooks for the current project. Never use
 
 **1. Find the binary.**
 
-Attributed has no release yet, so this command does not download a binary.
 Find `git-attributed` on `PATH`.
 
 Linux or macOS:
@@ -25,10 +24,9 @@ Windows PowerShell:
 $binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-If it is missing, stop. Tell the user to build it from an Attributed checkout
-with Go 1.24 or later, as in
-`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
-and then rerun this command. Run the remaining commands through the absolute
+If it is missing, stop. Tell the user to install it with Go 1.24 or later,
+`go install github.com/amichne/attributed/cmd/git-attributed@latest`, put
+`$(go env GOPATH)/bin` on `PATH`, and rerun this command. Run the remaining commands through the absolute
 `$binary` path, so setup does not depend on this process reloading `PATH`.
 Verify `$binary version`.
 
@@ -63,7 +61,6 @@ hook bodies.
 
 **4. Verify and report.**
 
-Run `"$binary" status`. Tell the user to add the reported install directory
-to `PATH` and to restart this agent so the hook is picked up. Stop and report
-the exact error when download, checksum, version, hook installation, or
-status verification fails.
+Run `"$binary" status`. Tell the user to restart this agent so the hook is
+picked up. Stop and report the exact error when hook installation or status
+verification fails.

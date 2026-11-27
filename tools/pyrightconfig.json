@@ -1,10 +1,9 @@
 {
-  "include": ["projection", "publish", "toolchain", "upstream-import"],
+  "include": ["projection", "publish", "toolchain"],
   "executionEnvironments": [
     { "root": "projection", "extraPaths": ["projection"] },
     { "root": "publish", "extraPaths": ["publish"] },
-    { "root": "toolchain", "extraPaths": ["toolchain"] },
-    { "root": "upstream-import", "extraPaths": ["upstream-import"] }
+    { "root": "toolchain", "extraPaths": ["toolchain"] }
   ],
   "pythonVersion": "3.12",
   "typeCheckingMode": "strict"

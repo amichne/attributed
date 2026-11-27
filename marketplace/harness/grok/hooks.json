@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type human --hook-input stdin # git-attributed-hook:grok-pre-edit",
+            "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type human --hook-input stdin # git-attributed-hook:grok-pre-edit",
             "timeout": 30
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type human --hook-input stdin # git-attributed-hook:grok-shell-pre",
+            "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type human --hook-input stdin # git-attributed-hook:grok-shell-pre",
             "timeout": 30
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type ai --hook-input stdin # git-attributed-hook:grok-post-edit",
+            "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type ai --hook-input stdin # git-attributed-hook:grok-post-edit",
             "timeout": 30
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type ai --hook-input stdin # git-attributed-hook:grok-shell-post",
+            "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; if [ -z \"${GROK_WORKSPACE_ROOT:-}\" ]; then printf '%s\\n' 'git-attributed grok hook requires non-empty GROK_WORKSPACE_ROOT.' >&2; exit 1; fi; cd \"$GROK_WORKSPACE_ROOT\" && git-attributed checkpoint portable-grok --type ai --hook-input stdin # git-attributed-hook:grok-shell-post",
             "timeout": 30
           }
         ]

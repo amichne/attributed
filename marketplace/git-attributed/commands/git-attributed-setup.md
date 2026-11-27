@@ -18,10 +18,10 @@ On Windows PowerShell, run:
 $binary = (Get-Command git-attributed -ErrorAction Stop).Source
 ```
 
-If it is missing, stop. Tell the user to build it from an Attributed checkout
-with Go 1.24 or later, as in
-`go build -trimpath -o <directory on PATH>/git-attributed ./cmd/git-attributed`,
-and then rerun this command. Run the remaining commands through the absolute
+If it is missing, stop. Tell the user to install it with Go 1.24 or later,
+`go install github.com/amichne/attributed/cmd/git-attributed@latest`, put
+`$(go env GOPATH)/bin` on `PATH`, and rerun this command. Run the remaining
+commands through the absolute
 `$binary` path so setup does not depend on the current agent process reloading
 `PATH`. Verify `$binary version`.
 
@@ -55,7 +55,6 @@ blob IDs. If the user wants automatic note sharing disabled, rerun the
 selected hook command with `--local-notes`. Notes can still be pushed
 explicitly.
 
-Run `$binary status`. Tell the user to add the reported install directory to
-`PATH` and restart active agents before relying on project hooks. Stop and
-report exact error when download, checksum, version, hook installation, or
+Run `$binary status`. Tell the user to restart active agents before relying
+on the hooks. Stop and report the exact error when hook installation or
 status verification fails. Never use `sudo`.

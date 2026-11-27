@@ -3,7 +3,7 @@
     "PreToolUse": [
       {
         "type": "command",
-        "command": "git-attributed checkpoint portable-vscode --type human --hook-input stdin # git-attributed-hook:vscode-pre-edit",
+        "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-vscode --type human --hook-input stdin # git-attributed-hook:vscode-pre-edit",
         "windows": "& 'git-attributed' 'checkpoint' 'portable-vscode' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:vscode-pre-edit",
         "matcher": "create_file|replace_string_in_file|multi_replace_string_in_file|insert_edit_into_file|apply_patch",
         "cwd": ".",
@@ -11,7 +11,7 @@
       },
       {
         "type": "command",
-        "command": "git-attributed checkpoint portable-vscode --type human --hook-input stdin # git-attributed-hook:vscode-shell-pre",
+        "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-vscode --type human --hook-input stdin # git-attributed-hook:vscode-shell-pre",
         "windows": "& 'git-attributed' 'checkpoint' 'portable-vscode' '--type' 'human' '--hook-input' 'stdin' # git-attributed-hook:vscode-shell-pre",
         "matcher": "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell",
         "cwd": ".",
@@ -21,7 +21,7 @@
     "PostToolUse": [
       {
         "type": "command",
-        "command": "git-attributed checkpoint portable-vscode --type ai --hook-input stdin # git-attributed-hook:vscode-post-edit",
+        "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-vscode --type ai --hook-input stdin # git-attributed-hook:vscode-post-edit",
         "windows": "& 'git-attributed' 'checkpoint' 'portable-vscode' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:vscode-post-edit",
         "matcher": "create_file|replace_string_in_file|multi_replace_string_in_file|insert_edit_into_file|apply_patch",
         "cwd": ".",
@@ -29,7 +29,7 @@
       },
       {
         "type": "command",
-        "command": "git-attributed checkpoint portable-vscode --type ai --hook-input stdin # git-attributed-hook:vscode-shell-post",
+        "command": "command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-vscode --type ai --hook-input stdin # git-attributed-hook:vscode-shell-post",
         "windows": "& 'git-attributed' 'checkpoint' 'portable-vscode' '--type' 'ai' '--hook-input' 'stdin' # git-attributed-hook:vscode-shell-post",
         "matcher": "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell",
         "cwd": ".",

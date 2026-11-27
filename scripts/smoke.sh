@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Cross-platform release smoke test for a built git-attributed binary.
+# Smoke test for a built git-attributed binary.
 #
 # Drives the real product flow against a throwaway repository: hooks,
 # checkpoints, annotation, blame, rebase and partial-commit regressions,
-# path edge cases, linked worktrees, reports, and note sharing. Runs on
-# Linux, macOS, and Windows (Git Bash) with no dependencies beyond Git and
-# POSIX tools.
+# path edge cases, linked worktrees, verification, note sharing, and a
+# missing binary. Needs nothing beyond Git and POSIX tools.
 #
 # Usage: ATTRIBUTED_BIN=/path/to/git-attributed scripts/smoke.sh
 
@@ -199,7 +198,7 @@ NOTES_COUNT="$(git --git-dir="$WORK/remote.git" notes --ref=attributed list | wc
 [[ "$NOTES_COUNT" -ge 1 ]] || fail "notes missing on remote: $NOTES_COUNT"
 
 step "pre-push merges notes another clone pushed"
-# The other clone plays a teammate or the forge job. An empty template keeps
+# The other clone plays a teammate. An empty template keeps
 # hooks from a user-level Git template out of it. --no-local fetches through
 # the file transport instead of copying loose objects, so a background gc in
 # the remote cannot make the clone read a vanished object.
@@ -331,6 +330,47 @@ if grep -q "attributed" .git/hooks/post-commit 2>/dev/null; then
   fail "managed block left in post-commit"
 fi
 [[ ! -f .git/hooks/pre-push ]] || fail "pre-push left behind"
+
+step "a missing binary leaves Git and agent hooks quiet"
+MOVABLE="$WORK/movable/git-attributed"
+mkdir -p "$(dirname "$MOVABLE")"
+cp "$BIN" "$MOVABLE"
+QUIET="$WORK/quiet"
+git init -q --bare "$WORK/quiet-remote.git"
+git init -q "$QUIET"
+git -C "$QUIET" config user.name "Smoke Test"
+git -C "$QUIET" config user.email "smoke@example.invalid"
+git -C "$QUIET" remote add origin "$WORK/quiet-remote.git"
+(cd "$QUIET" && "$MOVABLE" install-hooks --agent claude --git >/dev/null) || fail "quiet install-hooks"
+echo base >"$QUIET/a.txt"
+git -C "$QUIET" add a.txt
+git -C "$QUIET" commit -qm base >/dev/null || fail "quiet base commit"
+rm "$MOVABLE"
+QUIET_OUT="$({
+  echo one >>"$QUIET/a.txt"
+  git -C "$QUIET" commit -qam one
+  git -C "$QUIET" commit -q --amend -m one-amended
+  git -C "$QUIET" switch -q -c topic
+  git -C "$QUIET" switch -q -
+  git -C "$QUIET" push -q origin HEAD:refs/heads/quiet
+} 2>&1)" || fail "Git failed without the binary: $QUIET_OUT"
+[[ -z "$QUIET_OUT" ]] || fail "Git printed hook errors without the binary: $QUIET_OUT"
+AGENT_HOOK="$(grep -o "command -v 'git-attributed'[^\"]*--type ai --hook-input stdin" "$QUIET/.claude/settings.json" | head -n 1)"
+[[ -n "$AGENT_HOOK" ]] || fail "guarded Claude hook missing"
+AGENT_OUT="$(cd "$QUIET" && printf '{}' | PATH="/usr/bin:/bin" sh -c "$AGENT_HOOK" 2>&1)" || fail "Claude hook failed without the binary: $AGENT_OUT"
+[[ -z "$AGENT_OUT" ]] || fail "Claude hook printed without the binary: $AGENT_OUT"
+
+step "annotation resumes when the binary returns"
+cp "$BIN" "$MOVABLE"
+echo two >>"$QUIET/a.txt"
+RESUME_OUT="$(git -C "$QUIET" commit -qam two 2>&1)" || fail "commit after the binary returned: $RESUME_OUT"
+require "resume warning" "$RESUME_OUT" "resuming attribution after commits that were not annotated"
+STATUS="$(cd "$QUIET" && "$MOVABLE" status)"
+require "resumed status" "$STATUS" "Annotation pending: false"
+echo three >>"$QUIET/a.txt"
+NEXT_OUT="$(git -C "$QUIET" commit -qam three 2>&1)" || fail "commit after resuming: $NEXT_OUT"
+case "$NEXT_OUT" in *resuming*) fail "resumed twice: $NEXT_OUT" ;; esac
+(cd "$QUIET" && "$MOVABLE" verify >/dev/null) || fail "verify after resuming"
 
 echo
 echo "SMOKE OK"

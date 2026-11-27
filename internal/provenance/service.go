@@ -534,13 +534,28 @@ func Annotate(repo *gitcmd.Repo) (AnnotateResult, error) {
 	if len(parents) > 0 {
 		parent = parents[0]
 	}
+	resumed := false
+	if state.LastAnnotatedCommit != "" && state.LastAnnotatedCommit != parent && parent != "" {
+		// The hooks missed commits on this line of history, for example while
+		// git-attributed was not installed. Those commits keep no notes.
+		// Resume as on a repository with existing history, and drop the
+		// unstaged remainder recorded against the old boundary, because the
+		// missed commits may have changed it. Checkpoints from before the gap
+		// no longer match HEAD's parent, so they park instead of applying.
+		if base, err := repo.MergeBase(state.LastAnnotatedCommit, parent); err == nil && base == state.LastAnnotatedCommit {
+			warnings = append(warnings, "resuming attribution after commits that were not annotated; they have no notes")
+			state.LastAnnotatedCommit = ""
+			state.Pending = model.PendingState{}
+			resumed = true
+		}
+	}
 	if state.LastAnnotatedCommit != "" && state.LastAnnotatedCommit != parent {
 		return AnnotateResult{}, fmt.Errorf("commit gap or divergent history: last annotated %s, HEAD parent %s", state.LastAnnotatedCommit, parent)
 	}
 	// A parent note fetched after HEAD moved, such as another clone's note
 	// for a pulled commit, continues attribution even though the boundary
 	// is empty.
-	if state.LastAnnotatedCommit == "" && parent != "" && annotationBoundary(repo, parent) == "" {
+	if !resumed && state.LastAnnotatedCommit == "" && parent != "" && annotationBoundary(repo, parent) == "" {
 		warnings = append(warnings, "initializing attribution on a repository with existing history")
 	}
 

@@ -55,9 +55,13 @@ const local function powerShellCheckpoint(id: String, kind: Kind, tag: String): 
 const local function gitRootMessage(id: String): String =
   "git-attributed \(id) hook requires a Git worktree project root."
 
+/// Exits quietly when git-attributed is not installed, so a shared hook file
+/// never interrupts an agent on a machine without the binary.
+const local missingBinaryGuard = "command -v git-attributed >/dev/null 2>&1 || exit 0; "
+
 /// The POSIX shell command for one capture under one root strategy.
 const function posixCommand(root: Root, id: String, capture: Capture): String =
-  let (checkpoint = posixCheckpoint(id, capture.kind, tag(id, capture)))
+  missingBinaryGuard + let (checkpoint = posixCheckpoint(id, capture.kind, tag(id, capture)))
     if (root is GitTopLevel)
       #"ATTRIBUTED_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1; }; "#
       + #"case "$ATTRIBUTED_PROJECT_ROOT" in *[![:space:]]*) ;; *) printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1 ;; esac; "#
