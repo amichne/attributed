@@ -53,6 +53,14 @@ go build -o git-attributed ./cmd/git-attributed && ATTRIBUTED_BIN=./git-attribut
 
 `marketplace/` and `commands/` are generated from `integrations/`. Edit the source, then regenerate as the [projection guide](docs/extraction.mdx#project-harness-integrations) describes. `vhs docs/assets/blame.tape` re-records the demo.
 
+### Docs publishing
+
+GitHub CI validates the Mintlify build and internal links. Mintlify publishes
+from `docs/` on `main` through its GitHub integration. Check the commit in
+[Mintlify Publishes](https://dashboard.mintlify.com/attributed) and confirm the
+changed pages on the live site. If a docs commit never starts a build, check
+the Mintlify GitHub App's access to `amichne/attributed` in Git Settings.
+
 ## License
 
 [MIT](LICENSE). Attributed derives from [git-byline](https://github.com/comarch/git-byline) by Comarch S.A., also MIT, so copies keep the [upstream notice](LICENSE.upstream). `git attributed license` prints both notices.

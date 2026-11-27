@@ -1,7 +1,7 @@
 ---
 title: "Attributed"
 sidebarTitle: "Overview"
-description: "See which lines in every commit an AI agent wrote, stored in Git notes beside your history."
+description: "Set up agent and Git hooks to record AI line attribution in Git notes."
 keywords: ["git-attributed", "AI attribution", "git notes", "blame"]
 ---
 
@@ -11,7 +11,7 @@ Attributed records which lines an AI agent wrote, commit by commit. Agent hooks 
 
 ## Install
 
-There is no release yet. Install from source with Go 1.24 or later on Linux or macOS:
+Install the binary from source with Go 1.24 or later on Linux or macOS. The agent plugins provide setup commands and require the binary on your PATH.
 
 ```bash
 go install github.com/amichne/attributed/cmd/git-attributed@latest
@@ -21,20 +21,32 @@ Put `$(go env GOPATH)/bin` on `PATH`, or `$(go env GOBIN)` if you set it. Git th
 
 ## Quick start
 
-In a repository you work on with Claude Code:
+For Claude Code, install the agent and Git hooks from your repository:
 
 ```bash
 git attributed install-hooks --agent claude --git
 ```
 
-Work as usual, then commit. Each commit gets a note:
+Let Claude Code edit a file, commit the change, then inspect the attribution:
 
 ```bash
 git attributed blame path/to/file
 git attributed verify
 ```
 
-Use `--agent droid` for Factory. Other agents copy a hook file from [`marketplace/harness`](https://github.com/amichne/attributed/tree/main/marketplace/harness) and run `git attributed install-hooks --agent none --git`. Add `--local-notes` to keep notes out of your pushes.
+Use `--agent droid` for Factory. By default, the Git pre-push hook shares attribution notes with the remote you push to. Add `--local-notes` when installing the Git hooks to disable automatic note sharing.
+
+## Agent plugins
+
+The published Claude Code, Factory, and Gemini CLI manifests declare version `1.8.0`. Each package provides `/git-attributed-setup`. Run it from the repository you want to track, then restart the agent so it picks up the hooks.
+
+| Agent | Package source |
+| --- | --- |
+| Claude Code | [Claude Code marketplace](https://github.com/amichne/attributed/tree/harness/claude) |
+| Factory | [Factory marketplace](https://github.com/amichne/attributed/tree/harness/factory) |
+| Gemini CLI | [Gemini CLI extension](https://github.com/amichne/attributed/tree/harness/gemini) |
+
+The [agent setup guide](https://github.com/amichne/attributed/tree/main/marketplace/harness) lists the install commands and the files to copy for agents without a published package. For manual setup, install the agent's hook and run `git attributed install-hooks --agent none --git --project` in the repository.
 
 ## Next
 
