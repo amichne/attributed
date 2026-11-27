@@ -1,0 +1,86 @@
+# GoReleaser builds and publishes the archives for a release that
+# release-please has already tagged and created. See .github/workflows/release.yml.
+version: 2
+
+project_name: git-attributed
+
+builds:
+  - id: git-attributed
+    main: ./cmd/git-attributed
+    binary: git-attributed
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -X github.com/amichne/attributed/internal/version.Version={{ .Tag }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: git-attributed
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
+      mode: 0755
+    files:
+      - src: LICENSE
+        info: &bundled
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+      - src: LICENSE.upstream
+        info: *bundled
+      - src: README.md
+        info: *bundled
+
+checksum:
+  name_template: checksums.txt
+
+# release-please writes CHANGELOG.md and the release notes.
+changelog:
+  disable: true
+
+release:
+  mode: keep-existing
+
+homebrew_casks:
+  - name: git-attributed
+    ids:
+      - git-attributed
+    binaries:
+      - git-attributed
+    directory: Casks
+    homepage: https://github.com/amichne/attributed
+    description: Record which lines an AI agent wrote, in Git notes beside your history
+    license: MIT
+    url:
+      # A mirror with the same layout replaces the release root.
+      template: "#{ENV.fetch('HOMEBREW_GIT_ATTRIBUTED_URL_ROOT', 'https://github.com/amichne/attributed/releases/download')}/{{ .Tag }}/{{ .ArtifactName }}"
+    hooks:
+      post:
+        # The binary is not notarized, so Gatekeeper would block it on macOS.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/git-attributed"]
+          end
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "git-attributed {{ .Tag }}\n\nSource-Commit: {{ .FullCommit }}"
+    repository:
+      owner: amichne
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"

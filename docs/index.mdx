@@ -11,13 +11,40 @@ Attributed records which lines an AI agent wrote, commit by commit. Agent hooks 
 
 ## Install
 
-Install the binary from source with Go 1.24 or later on Linux or macOS. The agent plugins provide setup commands and require the binary on your PATH.
+The agent plugins provide setup commands and require the binary on your PATH. On macOS or Linux:
+
+```bash
+brew install amichne/tap/git-attributed
+```
+
+Or build it with Go 1.24 or later. Put `$(go env GOPATH)/bin` on `PATH`, or `$(go env GOBIN)` if you set it:
 
 ```bash
 go install github.com/amichne/attributed/cmd/git-attributed@latest
 ```
 
-Put `$(go env GOPATH)/bin` on `PATH`, or `$(go env GOBIN)` if you set it. Git then runs the binary as `git attributed`.
+Git runs the binary as `git attributed`.
+
+### Install through a Homebrew mirror
+
+The tap ships a cask that downloads one file: the release archive for your platform, pinned by SHA-256. It needs no toolchain and has no dependencies. To install without reaching GitHub, mirror two things:
+
+| Mirror | Of |
+| --- | --- |
+| A Git repository | `https://github.com/amichne/homebrew-tap.git` |
+| A file proxy with the same layout | `https://github.com/amichne/attributed/releases/download` |
+
+Then tap the Git mirror and point the formula at the file proxy:
+
+```bash
+brew tap amichne/tap https://git.example.internal/mirrors/amichne/homebrew-tap.git
+export HOMEBREW_GIT_ATTRIBUTED_URL_ROOT=https://artifacts.example.internal/github-releases/amichne/attributed/releases/download
+brew install amichne/tap/git-attributed
+```
+
+Replace the example hosts with your own. With the variable set, Homebrew fetches `<root>/v0.1.0/git-attributed_v0.1.0_darwin_arm64.tar.gz` and never falls back to GitHub; the checksum in the cask still has to match. `HOMEBREW_ARTIFACT_DOMAIN` does not cover this cask, because Homebrew rewrites only bottle downloads with it.
+
+Each archive includes `LICENSE` and `LICENSE.upstream`. Every release publishes `checksums.txt` and a build provenance attestation that `gh attestation verify <archive> --repo amichne/attributed` checks.
 
 ## Quick start
 
