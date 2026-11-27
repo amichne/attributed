@@ -1,21 +1,18 @@
 # Agent setup templates
 
-Three agents install git-attributed as a package. The rest have no package
-manager, so this directory carries the two files they need, ready to copy.
+This directory carries the two files each agent needs, ready to copy.
+
+No Attributed release exists yet. The setup commands download a release
+binary, so they fail until one is published. Until then, build
+`git-attributed` from source, put it on `PATH`, and copy the hook file.
 
 ## Agents with a package
 
-| Agent | Install |
-| --- | --- |
-| Factory | `droid plugin marketplace add amichne/attributed` then `/git-attributed-setup` |
-| Claude Code | `/plugin marketplace add amichne/attributed` then `/git-attributed-setup` |
-| Gemini CLI | `gemini extensions install https://github.com/amichne/attributed` then `/git-attributed-setup` |
-
-Factory and Claude Code both load [`../git-attributed`](../git-attributed): one
+Factory and Claude Code can load [`../git-attributed`](../git-attributed), one
 plugin directory with a manifest per agent and shared `commands/` and
-`skills/`. Gemini CLI reads `gemini-extension.json` and
-`commands/git-attributed-setup.toml` from the repository root, because that is
-where it installs an extension from.
+`skills/`. Gemini CLI can load `commands/git-attributed-setup.toml` as an
+extension. The repository does not publish the marketplace listings or the
+Gemini extension manifest those installs need yet.
 
 ## Agents you set up by copying
 
@@ -32,7 +29,7 @@ the hook file below. Copying the hook file by hand works too.
 | Windsurf | [`windsurf/git-attributed-setup.md`](windsurf/git-attributed-setup.md) | `.windsurf/workflows/` | [`windsurf/hooks.json`](windsurf/hooks.json) | `.windsurf/hooks.json` |
 | Grok | [`grok/git-attributed-setup.md`](grok/git-attributed-setup.md) | the prompt directory your build reads | [`grok/hooks.json`](grok/hooks.json) | `.grok/hooks/promptscript.json` |
 | OpenCode | [`opencode/git-attributed-setup.md`](opencode/git-attributed-setup.md) | `.opencode/commands/` | [`opencode/promptscript.ts`](opencode/promptscript.ts) | `.opencode/plugins/promptscript.ts` |
-| Gemini CLI, without the extension | none, use the extension above | | [`gemini/settings.json`](gemini/settings.json) | merge into `.gemini/settings.json` |
+| Gemini CLI | none | | [`gemini/settings.json`](gemini/settings.json) | merge into `.gemini/settings.json` |
 
 `.gemini/settings.json` and `.claude/settings.json` hold unrelated settings
 too, so merge the `hooks` block instead of replacing the file. Every other
@@ -46,11 +43,14 @@ moves the file into `.opencode/plugins`.
 
 ## Why these files are safe to copy
 
-Each hook file is byte-identical to the one this repository generates for
-itself, and `go run ./tools/validate` fails when they drift apart. The shell
-hook bodies contain no absolute path: they resolve the project root with
-`git rev-parse --show-toplevel` and find `git-attributed` through `PATH`. The
-OpenCode plugin uses its plugin context to resolve the project root.
+Each hook file is projected from typed source in `integrations/`, and
+`tools/projection/project.py check` fails when a committed file drifts from
+the projection. The hook bodies contain no absolute path and find
+`git-attributed` through `PATH`. Codex and Cursor hooks resolve the project
+root with `git rev-parse --show-toplevel`. Gemini CLI and Grok hooks read it
+from `GEMINI_PROJECT_DIR` and `GROK_WORKSPACE_ROOT`. Copilot, VS Code, and
+Windsurf hooks run in the directory the agent starts them in. The OpenCode
+plugin uses its plugin context to resolve the project root.
 
 Each hook calls `git-attributed checkpoint portable-<agent> --hook-input stdin`,
 which records a snapshot before and after an edit. OpenCode's generated plugin

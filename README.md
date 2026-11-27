@@ -18,6 +18,8 @@ go test ./...
 ATTRIBUTED_BIN=./git-attributed bash scripts/smoke.sh
 ```
 
+`marketplace/` and `commands/` are generated from `integrations/`. With Pkl 0.33.0 and `uv` installed, check them with `uv run --locked --script tools/projection/project.py check`. The [projection section](docs/extraction.mdx#project-harness-integrations) explains how to change and regenerate them.
+
 ## Design constraints
 
 Keep Go, the stock Git executable, and Git’s object and ref storage. Developers should be able to read a commit’s attribution after uninstalling the producer. The design excludes daemons, hosted services, external databases, Git replacements, and new runtime frameworks.
