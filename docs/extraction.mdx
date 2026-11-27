@@ -56,7 +56,7 @@ The rename changes wire identities, so an Attributed install does not read or wr
 - Hook ownership markers name `git-attributed`. Uninstall does not remove hooks that upstream installed.
 - Git AI export hashes the producer name into the synthetic human ID and the checkpoint trace IDs. The import regenerates `internal/interop/testdata/gitai-export.golden` from `sha256("git-attributed")` and `sha256("git-attributed:checkpoint:7")`.
 
-Reading existing `refs/notes/byline` records is a separate compatibility decision. It needs a fixture from an upstream install and a test that keeps the two namespaces distinct.
+`git-attributed import --format byline` reads existing `refs/notes/byline` records. The two namespaces stay distinct. See [Import git-byline notes](#import-git-byline-notes).
 
 ## License in the binary
 
@@ -70,7 +70,7 @@ Attributed is MIT licensed. `LICENSE` holds the Attributed notice and `LICENSE.u
 | 2 | Embed the license notices | Done | `go test ./...` passed 23 packages, 994 top-level tests, and 1,569 subtests, including the built-binary license check. |
 | 3 | Project harness integrations | Done | The projection reproduced every imported file except the corrected OpenCode checksum. `project.py check` passes on 24 files. |
 | 4 | Remove out-of-scope producers | Done | `go list -deps ./cmd/git-attributed` lists the 16-package candidate closure. Each removed test maps to a removed capability, and the 16-stage smoke suite passes. |
-| 5 | Decide legacy note compatibility | Planned | A fixture from an upstream install reads correctly, or the documents state that it is not read. |
+| 5 | Import git-byline notes | Done | A note that the pinned upstream binary wrote imports byte for byte and blames correctly. Attribution then continues on the next commit. |
 
 ### Project harness integrations
 
@@ -140,3 +140,32 @@ A test checks that each removed command now fails as unknown. The smoke suite ha
 | Stripped CLI, Darwin arm64, Go 1.27.3 | 6,218,162 bytes | 4,229,586 bytes |
 
 At slice 4, `go test ./...` passed 18 packages, 718 top-level tests and fuzz targets, and 1,263 subtests with no skips. The binary SHA-256 was `d7de2982ede9707c8efc8f08b4af66190c00d4edb423e498e0990ae336b701e9`, built with the baseline flags.
+
+### Import git-byline notes
+
+git-byline and Attributed share the note format, versions 1 through 4. Only the namespace differs: upstream writes `refs/notes/byline`, and Attributed reads and writes `refs/notes/attributed`. The import copies upstream notes across:
+
+```sh
+git-attributed import --format byline --dry-run --range HEAD
+git-attributed import --format byline --range HEAD
+```
+
+Without `--range`, the import reads only HEAD. Each note must decode as a supported version. Every file it names must match the commit's blob, and its ranges must cover that blob's lines. The import copies the original bytes, so the note keeps its version. It skips a note that fails these checks and prints a warning. It never replaces a different note that already exists under `refs/notes/attributed`. Repeating the import changes nothing.
+
+To migrate a repository from git-byline:
+
+1. If a remote holds the notes, fetch them with `git fetch origin refs/notes/byline:refs/notes/byline`.
+2. Remove the upstream hooks with `git-byline uninstall --git`, so the two producers do not both run.
+3. Run the import, then `git-attributed install-hooks --git`.
+
+The import reads committed notes only. Upstream's pending checkpoints under the Git directory's `byline/` state and its `refs/notes/byline-stash` records stay behind, so attribution for uncommitted upstream work is lost.
+
+The fixture in `internal/interop/testdata/git-byline-note.json` is a note that the pinned upstream binary wrote. Tests cover these cases:
+
+- An exact copy and an idempotent repeat
+- A dry run
+- A range walk
+- A blob mismatch, a malformed note, and an unsupported version
+- A different existing note
+
+A disposable repository exercised the full migration with both real binaries. Upstream annotated two commits. The import copied both notes byte for byte, and `blame` matched upstream's output. After `install-hooks`, the next AI edit was annotated, and `verify` passed for all three commits.

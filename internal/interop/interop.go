@@ -618,25 +618,8 @@ func readAttributed(repo *gitcmd.Repo, commit string) (model.Note, []model.Check
 	if err != nil {
 		return model.Note{}, nil, fmt.Errorf("decode attributed note: %w", err)
 	}
-	for path, file := range note.Files {
-		blob, exists, err := repo.BlobID(commit, path)
-		if err != nil {
-			return model.Note{}, nil, fmt.Errorf("inspect attributed file %q: %w", path, err)
-		}
-		if !exists || blob != file.Blob {
-			return model.Note{}, nil, fmt.Errorf("attributed blob for %q does not match commit", path)
-		}
-		content, err := repo.ReadBlob(blob)
-		if err != nil {
-			return model.Note{}, nil, fmt.Errorf("read attributed file %q: %w", path, err)
-		}
-		lines, err := engine.SplitLines(content)
-		if err != nil {
-			return model.Note{}, nil, fmt.Errorf("read attributed file %q: %w", path, err)
-		}
-		if err := model.ValidateRanges(file.Ranges, len(lines)); err != nil {
-			return model.Note{}, nil, fmt.Errorf("attributed file %q: %w", path, err)
-		}
+	if err := validateNoteFiles(repo, commit, note); err != nil {
+		return model.Note{}, nil, err
 	}
 	checkpoints, warnings, err := store.New(repo.GitDir).ReadCheckpoints()
 	if err != nil {
@@ -644,6 +627,33 @@ func readAttributed(repo *gitcmd.Repo, commit string) (model.Note, []model.Check
 	}
 	_ = warnings
 	return note, checkpoints, nil
+}
+
+// validateNoteFiles checks that every file in note names the blob that
+// commit holds at that path, and that its ranges cover exactly that blob's
+// lines.
+func validateNoteFiles(repo *gitcmd.Repo, commit string, note model.Note) error {
+	for path, file := range note.Files {
+		blob, exists, err := repo.BlobID(commit, path)
+		if err != nil {
+			return fmt.Errorf("inspect attributed file %q: %w", path, err)
+		}
+		if !exists || blob != file.Blob {
+			return fmt.Errorf("attributed blob for %q does not match commit", path)
+		}
+		content, err := repo.ReadBlob(blob)
+		if err != nil {
+			return fmt.Errorf("read attributed file %q: %w", path, err)
+		}
+		lines, err := engine.SplitLines(content)
+		if err != nil {
+			return fmt.Errorf("read attributed file %q: %w", path, err)
+		}
+		if err := model.ValidateRanges(file.Ranges, len(lines)); err != nil {
+			return fmt.Errorf("attributed file %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func resolveCommit(repo *gitcmd.Repo, revision string) (string, error) {

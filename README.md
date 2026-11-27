@@ -2,7 +2,7 @@
 
 Which lines in a commit can you trace to an observed agent edit? Attributed aims to answer that question with a small Go distribution derived from Comarch’s git-byline. Agent hooks capture edits, a reconciler matches the evidence to the lines Git actually commits, and Git notes carry the result alongside history.
 
-**Extraction is in progress.** This tree imports the pinned upstream source with every `byline` name changed to `attributed`. It builds `git-attributed`, which Git runs as `git attributed`. Notes live under `refs/notes/attributed`. Dashboards, statistics, policy checks, disclosure, forge workflows, self-update, and token accounting have been removed. No release exists yet, so build the binary from this checkout. Like upstream, it can label unexplained lines as human, and overlapping shell events can be ambiguous when the harness supplies no event ID.
+**Extraction is in progress.** This tree imports the pinned upstream source with every `byline` name changed to `attributed`. It builds `git-attributed`, which Git runs as `git attributed`. Notes live under `refs/notes/attributed`. Dashboards, statistics, policy checks, disclosure, forge workflows, self-update, and token accounting have been removed. No release exists yet, so build the binary from this checkout. `git-attributed import --format byline` brings existing git-byline notes across. Like upstream, it can label unexplained lines as human, and overlapping shell events can be ambiguous when the harness supplies no event ID.
 
 ## Start here
 
