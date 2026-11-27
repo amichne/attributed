@@ -1,0 +1,30 @@
+{
+  "files": {
+    "commands/git-attributed-setup.toml": "d0e1b7f0db5f86c517de2e0ed66b58fafa54ac2ab1ab4bfa0a7966c9ce779566",
+    "marketplace/git-attributed/.claude-plugin/plugin.json": "cca27465882eef554127307597676c42863abd76882c99295cb576d1ad71f47c",
+    "marketplace/git-attributed/.factory-plugin/plugin.json": "cca27465882eef554127307597676c42863abd76882c99295cb576d1ad71f47c",
+    "marketplace/git-attributed/LICENSE": "5739e47ce8e4f54a80975ce5335ab2e56b078e2558d27eab6556650fe032c69a",
+    "marketplace/git-attributed/README.md": "b81ab8ce87aa62ea215865c7d8ce69bc4adb894a54219e51f6976157ee15df7a",
+    "marketplace/git-attributed/commands/git-attributed-setup.md": "0d475f93f89eab0c2c08ef57bfdd1abcb62a67af0a4ece2355d7f53fa225112d",
+    "marketplace/git-attributed/skills/git-attributed/SKILL.md": "7b0b2b91fb928ac51076e8c9696e9219be52294a805f8ad992da6e378f24f735",
+    "marketplace/harness/README.md": "f2dddcb07f996e0b38d64ee6c95cb78945040cb741f35ff2b3687c2ecae4f67a",
+    "marketplace/harness/codex/git-attributed-setup.md": "1882a756a150f6c9b3d6371dcdf1d6a5b4c705212b05b1b7833209bab5012fa7",
+    "marketplace/harness/codex/hooks.json": "044884dfcf79a6d57f67af7d4dafb8ec98d0dd4f45dafc46519996c1c3095810",
+    "marketplace/harness/copilot/git-attributed-setup.prompt.md": "8fd137c961c118a8d877cb332b00cf0926735440972c2604633a54bd31b9721d",
+    "marketplace/harness/copilot/hooks.json": "6db6cbba7eb55eb7586a6760d740367e969c7027751b784e1d8011996023bd67",
+    "marketplace/harness/cursor/git-attributed-setup.md": "3a2a15da39953ff4adf1ca29391bfc10285808daf0dcd456ea833eb627e55985",
+    "marketplace/harness/cursor/hooks.json": "ae40c52c9a8ec4448aa30edf5f9e68786b454c0b1378bf9b396ff405f55a3e9d",
+    "marketplace/harness/gemini/settings.json": "abaff69021f7973ceae9c5ca4049a07a2879d3eb56c1a3435b50dea1d683ca00",
+    "marketplace/harness/grok/git-attributed-setup.md": "8fd12c3d8ee94e6fdfcd8f57b7a4ee9487d087ea5e4c594ac48a3b4a8b8d8782",
+    "marketplace/harness/grok/hooks.json": "20fcc8c30ce75363931ed06f4356b5e0eb186b3adc5213bf536faba8cd706220",
+    "marketplace/harness/opencode/git-attributed-setup.md": "02d6a240f3e99e8c7adbd0d274325baf59c7a2afe40d56b43a1a970a216e3ee2",
+    "marketplace/harness/opencode/promptscript.ts": "bbe4a3c2264442b09172a4dde1406d88f5192e676ffdf7cc2118d69264bf2e3e",
+    "marketplace/harness/vscode/git-attributed-setup.prompt.md": "83d87df0b375e029c53149966684582876b81c1e9cd42f5243ca7141179a4371",
+    "marketplace/harness/vscode/hooks.json": "1cf686e129ae501a219bbef6a6e6a2881fa64be78d81405d1592c31e6d4deeb8",
+    "marketplace/harness/windsurf/git-attributed-setup.md": "665b99874914830a01582b819b18a2a6b1328d4394d82f64ae7dd6f6e27d4c2a",
+    "marketplace/harness/windsurf/hooks.json": "567167d556fb4960a58ca7f075a29aa62347079abeff214ca04a8fdff343d9ae"
+  },
+  "pkl": "0.33.0",
+  "sourceSha": "e01276a1a6458cda6898b4f7d60370a1a040c7d48c6387c4796765005f76f270",
+  "version": 1
+}

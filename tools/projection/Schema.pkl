@@ -1,0 +1,322 @@
+/// Typed shapes for the agent integrations that Attributed distributes.
+///
+/// `integrations/Integrations.pkl` amends this module with the facts that
+/// change: tool matchers, timeouts, and plugin metadata. Each harness class
+/// fixes its provider's file shape, its `portable-<id>` checkpoint preset,
+/// and how its hook command reaches the project root. `Project.pkl` turns
+/// the amended module into a complete file plan.
+module Schema
+
+/// The checkpoint kind a hook records.
+typealias Kind = "human"|"ai"
+
+/// A capture point. Before a tool call, a hook records the human baseline.
+/// After it, a hook records the AI edit.
+class Capture {
+  phase: "pre"|"post"
+  target: "edit"|"shell"
+  fixed kind: Kind = if (phase == "pre") "human" else "ai"
+  fixed suffix: String = if (target == "edit") "\(phase)-edit" else "shell-\(phase)"
+}
+
+const preEdit: Capture = new { phase = "pre"; target = "edit" }
+const preShell: Capture = new { phase = "pre"; target = "shell" }
+const postEdit: Capture = new { phase = "post"; target = "edit" }
+const postShell: Capture = new { phase = "post"; target = "shell" }
+
+/// A tool-name pattern a harness matches before it runs a hook.
+typealias Matcher = String(!isEmpty && !contains("\n"))
+
+/// How a hook command reaches the project root before it records a checkpoint.
+abstract class Root {}
+
+/// The harness runs the hook in the project root.
+class WorkingDirectory extends Root {}
+
+/// The hook resolves the root with `git rev-parse --show-toplevel`.
+class GitTopLevel extends Root {}
+
+/// The harness exports the root in an environment variable.
+class EnvironmentDirectory extends Root {
+  variable: String(matches(Regex(#"[A-Z][A-Z0-9_]*"#)))
+}
+
+const local function tag(id: String, capture: Capture): String = "\(id)-\(capture.suffix)"
+
+const local function marker(tag: String): String = "# promptscript-generated:\(tag)"
+
+const local function posixCheckpoint(id: String, kind: Kind, tag: String): String =
+  "git-attributed checkpoint portable-\(id) --type \(kind) --hook-input stdin \(marker(tag))"
+
+const local function powerShellCheckpoint(id: String, kind: Kind, tag: String): String =
+  "& 'git-attributed' 'checkpoint' 'portable-\(id)' '--type' '\(kind)' '--hook-input' 'stdin' \(marker(tag))"
+
+const local function gitRootMessage(id: String): String =
+  "PromptScript \(id) hook requires a Git worktree project root."
+
+/// The POSIX shell command for one capture under one root strategy.
+const function posixCommand(root: Root, id: String, capture: Capture): String =
+  let (checkpoint = posixCheckpoint(id, capture.kind, tag(id, capture)))
+    if (root is GitTopLevel)
+      #"PROMPTSCRIPT_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1; }; "#
+      + #"case "$PROMPTSCRIPT_PROJECT_ROOT" in *[![:space:]]*) ;; *) printf '%s\n' '\#(gitRootMessage(id))' >&2; exit 1 ;; esac; "#
+      + #"cd "$PROMPTSCRIPT_PROJECT_ROOT" && "# + checkpoint
+    else if (root is EnvironmentDirectory)
+      #"if [ -z "${\#(root.variable):-}" ]; then printf '%s\n' 'PromptScript \#(id) hook requires non-empty \#(root.variable).' >&2; exit 1; fi; "#
+      + #"cd "$\#(root.variable)" && "# + checkpoint
+    else
+      checkpoint
+
+/// The PowerShell command for one capture under one root strategy.
+const function powerShellCommand(root: WorkingDirectory|GitTopLevel, id: String, capture: Capture): String =
+  let (checkpoint = powerShellCheckpoint(id, capture.kind, tag(id, capture)))
+    if (root is GitTopLevel)
+      #"$promptscriptProjectRoot = git rev-parse --show-toplevel 2>$null; "#
+      + #"if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($promptscriptProjectRoot)) "#
+      + #"{ [Console]::Error.WriteLine('\#(gitRootMessage(id))'); exit 1 }; "#
+      + #"Set-Location -LiteralPath $promptscriptProjectRoot -ErrorAction Stop; "#
+      + checkpoint
+    else
+      checkpoint
+
+/// One agent harness with a copyable hook file.
+abstract class Harness {
+  /// The checkpoint preset suffix, as in `portable-<id>`.
+  fixed id: String
+  /// The hook file name inside `marketplace/harness/<id>/`.
+  fixed fileName: String = "hooks.json"
+  /// The JSON value the hook file renders.
+  fixed document: Dynamic
+}
+
+/// A harness that matches file-editing tools and shell tools separately.
+abstract class MatchingHarness extends Harness {
+  editMatcher: Matcher
+  shellMatcher: Matcher
+  /// Hook timeout in the harness's own unit. Pkl's `isPositive` admits zero.
+  timeout: Int(this > 0)
+
+  function matcherFor(capture: Capture): Matcher =
+    if (capture.target == "edit") editMatcher else shellMatcher
+}
+
+/// OpenAI Codex `hooks.json`.
+class Codex extends MatchingHarness {
+  fixed id = "codex"
+  fixed root: GitTopLevel = new {}
+  fixed status: Mapping<String, String> = new {
+    ["pre-edit"] = "git-attributed: capturing pre-edit state"
+    ["shell-pre"] = "git-attributed: capturing pre-shell state"
+    ["post-edit"] = "git-attributed: capturing AI edit"
+    ["shell-post"] = "git-attributed: capturing AI shell changes"
+  }
+  function entry(capture: Capture): Dynamic =
+    let (pattern = matcherFor(capture))
+    let (posix = posixCommand(root, id, capture))
+    let (windows = powerShellCommand(root, id, capture))
+    let (seconds = timeout)
+    let (message = status[capture.suffix])
+      new {
+        matcher = pattern
+        hooks {
+          new {
+            type = "command"
+            command = posix
+            commandWindows = windows
+            timeout = seconds
+            statusMessage = message
+          }
+        }
+      }
+  fixed document = new {
+    hooks {
+      PreToolUse { entry(preEdit); entry(preShell) }
+      PostToolUse { entry(postEdit); entry(postShell) }
+    }
+  }
+}
+
+/// GitHub Copilot `hooks.json`.
+class Copilot extends MatchingHarness {
+  fixed id = "copilot"
+  fixed root: WorkingDirectory = new {}
+  function entry(capture: Capture): Dynamic =
+    let (pattern = matcherFor(capture))
+    let (posix = posixCommand(root, id, capture))
+    let (windows = powerShellCommand(root, id, capture))
+    let (seconds = timeout)
+      new {
+        type = "command"
+        bash = posix
+        powershell = windows
+        cwd = "."
+        matcher = pattern
+        timeoutSec = seconds
+      }
+  fixed document = new {
+    version = 1
+    hooks {
+      preToolUse { entry(preEdit); entry(preShell) }
+      postToolUse { entry(postEdit); entry(postShell) }
+    }
+  }
+}
+
+/// Cursor `hooks.json`.
+class Cursor extends MatchingHarness {
+  fixed id = "cursor"
+  fixed root: GitTopLevel = new {}
+  function entry(capture: Capture): Dynamic =
+    let (pattern = matcherFor(capture))
+    let (posix = posixCommand(root, id, capture))
+    let (seconds = timeout)
+      new {
+        matcher = pattern
+        command = posix
+        timeout = seconds
+      }
+  fixed document = new {
+    version = 1
+    hooks {
+      preToolUse { entry(preEdit); entry(preShell) }
+      postToolUse { entry(postEdit); entry(postShell) }
+    }
+  }
+}
+
+/// A harness whose hook file nests command hooks under each matcher and
+/// whose root arrives in an environment variable.
+abstract class NestedHarness extends MatchingHarness {
+  fixed variable: String
+  function entry(capture: Capture): Dynamic =
+    let (pattern = matcherFor(capture))
+    let (posix = posixCommand(new EnvironmentDirectory { variable = outer.variable }, id, capture))
+    let (seconds = timeout)
+      new {
+        matcher = pattern
+        hooks {
+          new {
+            type = "command"
+            command = posix
+            timeout = seconds
+          }
+        }
+      }
+}
+
+/// Gemini CLI `settings.json` hooks block. Timeouts are in milliseconds.
+class Gemini extends NestedHarness {
+  fixed id = "gemini"
+  fixed fileName = "settings.json"
+  fixed variable = "GEMINI_PROJECT_DIR"
+  fixed document =
+    let (harness = this)
+      new {
+        hooks {
+          BeforeTool { harness.entry(preEdit); harness.entry(preShell) }
+          AfterTool { harness.entry(postEdit); harness.entry(postShell) }
+        }
+      }
+}
+
+/// Grok `hooks.json`.
+class Grok extends NestedHarness {
+  fixed id = "grok"
+  fixed variable = "GROK_WORKSPACE_ROOT"
+  fixed document =
+    let (harness = this)
+      new {
+        hooks {
+          PreToolUse { harness.entry(preEdit); harness.entry(preShell) }
+          PostToolUse { harness.entry(postEdit); harness.entry(postShell) }
+        }
+      }
+}
+
+/// VS Code agent `hooks.json`.
+class VSCode extends MatchingHarness {
+  fixed id = "vscode"
+  fixed root: WorkingDirectory = new {}
+  function entry(capture: Capture): Dynamic =
+    let (pattern = matcherFor(capture))
+    let (posix = posixCommand(root, id, capture))
+    let (powershell = powerShellCommand(root, id, capture))
+    let (seconds = timeout)
+      new {
+        type = "command"
+        command = posix
+        windows = powershell
+        matcher = pattern
+        cwd = "."
+        timeout = seconds
+      }
+  fixed document = new {
+    hooks {
+      PreToolUse { entry(preEdit); entry(preShell) }
+      PostToolUse { entry(postEdit); entry(postShell) }
+    }
+  }
+}
+
+/// Windsurf `hooks.json`. Windsurf names one event per tool family and
+/// takes no matcher, so every event records the edit capture point.
+class Windsurf extends Harness {
+  fixed id = "windsurf"
+  fixed root: WorkingDirectory = new {}
+  fixed families: Listing<String> = new { "read_code"; "write_code"; "run_command"; "mcp_tool_use" }
+  function entry(capture: Capture): Dynamic =
+    let (posix = posixCommand(root, id, capture))
+    let (windows = powerShellCommand(root, id, capture))
+      new {
+        command = posix
+        powershell = windows
+        working_directory = "."
+      }
+  fixed document = new {
+    hooks {
+      for (family in families) {
+        ["pre_\(family)"] { entry(preEdit) }
+      }
+      for (family in families) {
+        ["post_\(family)"] { entry(postEdit) }
+      }
+    }
+  }
+}
+
+/// The plugin manifest that Claude Code and Factory both read.
+class Plugin {
+  name: String(!isEmpty)
+  description: String(!isEmpty)
+  version: String(matches(Regex(#"\d+\.\d+\.\d+"#)))
+  author: String(!isEmpty)
+  homepage: String(startsWith("https://"))
+  repository: String(startsWith("https://"))
+  license: "MIT"
+  keywords: Listing<String(!isEmpty)>(isDistinct)
+
+  fixed document: Dynamic =
+    let (plugin = this)
+      new {
+        name = plugin.name
+        description = plugin.description
+        version = plugin.version
+        author { name = plugin.author }
+        homepage = plugin.homepage
+        repository = plugin.repository
+        license = plugin.license
+        keywords = plugin.keywords
+      }
+}
+
+/// A repository-relative path of a file copied from `integrations/assets/`.
+typealias AssetPath = String(matches(Regex(#"(marketplace|commands)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+"#)))
+
+/// Every harness with a copyable hook file, one per class.
+harnesses: Listing<Harness>(isDistinctBy((it) -> it.id))
+
+plugin: Plugin
+
+/// Every file under `integrations/assets/`. The driver rejects a file on
+/// disk that this list omits.
+assets: Listing<AssetPath>(isDistinct)

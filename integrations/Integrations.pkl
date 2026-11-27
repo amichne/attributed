@@ -1,0 +1,73 @@
+/// The agent integrations Attributed distributes.
+///
+/// Change hook matchers, timeouts, and plugin metadata here. Files under
+/// `assets/` are copied to the same relative path in the repository. An
+/// asset may write `@@sha256:<path>@@` to embed the digest of another
+/// projected file. Regenerate `marketplace/` and `commands/` with
+/// `tools/projection/project.py` instead of editing them.
+amends "../tools/projection/Schema.pkl"
+
+import "../tools/projection/Schema.pkl"
+
+local shell = "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell"
+
+harnesses {
+  new Schema.Codex {
+    editMatcher = "apply_patch|create_file|delete_file|edit_file|write_file"
+    shellMatcher = shell
+    timeout = 30
+  }
+  new Schema.Copilot {
+    editMatcher = "apply_patch|create_file|edit_file|write_file|replace_string_in_file|multi_replace_string_in_file"
+    shellMatcher = shell
+    timeout = 30
+  }
+  new Schema.Cursor {
+    editMatcher = "create_file|delete_file|edit_file|write_file|apply_patch|search_replace|Edit|Write"
+    shellMatcher = shell
+    timeout = 30
+  }
+  new Schema.Gemini {
+    editMatcher = "write_file|replace"
+    shellMatcher = shell
+    timeout = 30000
+  }
+  new Schema.Grok {
+    editMatcher = "Create|Edit|ApplyPatch|create_file|edit_file|write_file|apply_patch"
+    shellMatcher = shell
+    timeout = 30
+  }
+  new Schema.VSCode {
+    editMatcher = "create_file|replace_string_in_file|multi_replace_string_in_file|insert_edit_into_file|apply_patch"
+    shellMatcher = shell
+    timeout = 30
+  }
+  new Schema.Windsurf {}
+}
+
+plugin {
+  name = "git-attributed"
+  description = "Install and use local human and AI line attribution"
+  version = "1.8.0"
+  author = "Austin Michne"
+  homepage = "https://github.com/amichne/attributed"
+  repository = "https://github.com/amichne/attributed"
+  license = "MIT"
+  keywords { "git"; "attribution"; "ai"; "provenance" }
+}
+
+assets {
+  "commands/git-attributed-setup.toml"
+  "marketplace/git-attributed/README.md"
+  "marketplace/git-attributed/commands/git-attributed-setup.md"
+  "marketplace/git-attributed/skills/git-attributed/SKILL.md"
+  "marketplace/harness/README.md"
+  "marketplace/harness/codex/git-attributed-setup.md"
+  "marketplace/harness/copilot/git-attributed-setup.prompt.md"
+  "marketplace/harness/cursor/git-attributed-setup.md"
+  "marketplace/harness/grok/git-attributed-setup.md"
+  "marketplace/harness/opencode/git-attributed-setup.md"
+  "marketplace/harness/opencode/promptscript.ts"
+  "marketplace/harness/vscode/git-attributed-setup.prompt.md"
+  "marketplace/harness/windsurf/git-attributed-setup.md"
+}

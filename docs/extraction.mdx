@@ -68,20 +68,41 @@ Attributed is MIT licensed. `LICENSE` holds the Attributed notice and `LICENSE.u
 | --- | --- | --- | --- |
 | 1 | Import the pinned tree with the naming map | Done | Codemod output matches the import commit. All 22 packages and the 17-stage smoke suite pass. |
 | 2 | Embed the license notices | Done | `go test ./...` passed 23 packages, 994 top-level tests, and 1,569 subtests, including the built-binary license check. |
-| 3 | Project harness integrations | Planned | The projector reproduces the imported `marketplace/harness` bytes before any payload changes. |
+| 3 | Project harness integrations | Done | The projection reproduced every imported file except the corrected OpenCode checksum. `project.py check` passes on 24 files. |
 | 4 | Remove out-of-scope producers | Planned | `go list -deps ./cmd/git-attributed` shows only the candidate closure. Each removed test maps to a removed capability. |
 | 5 | Decide legacy note compatibility | Planned | A fixture from an upstream install reads correctly, or the documents state that it is not read. |
 
 ### Project harness integrations
 
-Upstream generated its hook payloads from `.promptscript` sources with the optional PromptScript CLI. The generator stays upstream, so the imported payloads under `marketplace/harness` and `marketplace/git-attributed` have no source owner. Follow the Slopsentral projection pattern instead:
+Upstream generated its hook payloads with the PromptScript CLI from sources that the import left out. Attributed follows the Slopsentral projection pattern instead. `marketplace/` and `commands/` are generated consumers. Change their source and regenerate them; do not edit them by hand.
 
-1. Write one typed definition per harness: capture events, matchers, command, timeout, and install location.
-2. Freeze the definition bytes and modes. Evaluate typed Pkl models into a provider plan.
-3. Materialize payloads, seal their digests in a lock, and publish to a fresh destination that rejects replacement.
-4. Fail with a finite stage and code for missing assets, conflicting identities, incomplete plans, or changed inputs.
+| Owner | Contents |
+| --- | --- |
+| `integrations/Integrations.pkl` | Tool matchers and timeouts for Codex, Copilot, Cursor, Gemini CLI, Grok, and VS Code. It also holds the plugin manifest metadata and the closed list of assets. |
+| `integrations/assets/` | Setup commands, READMEs, the skill, the OpenCode plugin, and the Gemini command, at their output paths. `@@sha256:<path>@@` embeds the digest of another projected file. |
+| `tools/projection/Schema.pkl` | Each provider's file shape, its `portable-<id>` preset, and how its hook command reaches the project root. |
+| `tools/projection/Project.pkl` | The file plan: rendered hook files, both plugin manifests, the plugin license from `LICENSE.upstream`, and the assets. |
+| `tools/projection/project.py` | Freezing, evaluation, sealing, the lock, publication, and the drift check. |
 
-The first projection must reproduce the imported bytes exactly. Payload changes come after parity. A projected file shows only what the package contains. Harness discovery and hook delivery still need evidence from a live session.
+The driver requires Pkl 0.33.0 and evaluates with `--root-dir` set to a frozen copy of the inputs. It allows only `pkl:` and `file:` modules and only `file:` and `prop:` resources, with a 60-second limit. A first pass renders seals as 64 zeros. The driver digests each referenced file and evaluates again with those digests. It then verifies that only the placeholders changed. It writes `marketplace/projection-lock.json` with the source digest and every file digest. Publication renames a complete sibling staging tree into place and refuses an existing destination. Every failure prints `PROJECTION_REJECTED stage=<stage> code=<code>`. The codes cover missing or non-regular sources, a missing or unpinned Pkl, evaluation failures, unsafe or duplicate paths, undeclared assets, missing or chained seals, changed inputs, existing outputs, and drift.
+
+To change an integration, edit its source, then regenerate and check:
+
+```sh
+uv run --locked --script tools/projection/project.py publish --out /tmp/attributed-projection
+rm -r marketplace commands
+cp -R /tmp/attributed-projection/marketplace /tmp/attributed-projection/commands .
+uv run --locked --script tools/projection/project.py check
+```
+
+The projection reproduced every imported file byte for byte, with one exception. The rename had left the OpenCode setup command's plugin checksum at upstream's digest, so setup would have refused the renamed plugin. The seal now supplies the projected plugin's digest. The projector tests cover rejected plans, sealing, publication, drift on a changed matcher, and a zero timeout. Pkl's `isPositive` admits zero, so the schema requires `this > 0`.
+
+A projected file proves only what the package contains. Harness discovery and hook delivery still need evidence from a live session. These gaps remain:
+
+- No release exists, so setup commands that download the binary fail.
+- The repository publishes no Claude Code or Factory marketplace listing and no Gemini extension manifest, so the package installs in the harness README do not work yet.
+- The hook payloads still carry upstream PromptScript names, such as `PROMPTSCRIPT_PROJECT_ROOT`, `promptscript-generated` markers, and the `promptscript.json` hook file names. Renaming them is a payload change. It needs a matching change to the hook paths in `internal/app/update.go`.
+- `git-attributed install-hooks` writes the Claude Code and Factory hooks from Go in `internal/hooks`. The projection does not own those hooks.
 
 ### Remove out-of-scope producers
 
