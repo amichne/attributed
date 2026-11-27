@@ -13,7 +13,7 @@ allowed-tools:
 
 # git-attributed
 
-Use `/git-attributed-setup` for checksum-verified installation and hook activation.
+Use `/git-attributed-setup` to activate the agent and Git hooks.
 
 Use:
 
@@ -21,12 +21,12 @@ Use:
 git-attributed status
 git-attributed blame path/to/file
 git-attributed blame --json path/to/file
-git-attributed dashboard
-git-attributed dashboard --output report.html path/to/file
+git-attributed verify
+git notes --ref=attributed show HEAD
 ```
 
 Attribution data stays in local Git objects, worktree state, and
 `refs/notes/attributed`. Git hook installation shares the notes ref on ordinary
 pushes unless `--local-notes` was selected. Never expose checkpoint content,
-repository paths, session identifiers, note data, or generated dashboards in
-public logs. Never push retention refs.
+repository paths, session identifiers, or note data in public logs. Never push
+retention refs.
