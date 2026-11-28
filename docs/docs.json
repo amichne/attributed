@@ -29,5 +29,8 @@
     "socials": {
       "github": "https://github.com/amichne/attributed"
     }
+  },
+  "metadata": {
+    "timestamp": true
   }
 }
