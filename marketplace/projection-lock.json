@@ -7,7 +7,7 @@
     "marketplace/git-attributed/README.md": "b86999f667fd14d353e271b98c7687873a9f490bf7419e7a04f7bcdc6aac9c70",
     "marketplace/git-attributed/commands/git-attributed-setup.md": "67ce14e0f0527ca333e31f80d497d872f95b5f43448f14e44acbb8a661a1b3ce",
     "marketplace/git-attributed/skills/git-attributed/SKILL.md": "3c4a32e4101bd9ea7b596d4416473c1ba25966e3859120b566e46aa7622f6ba8",
-    "marketplace/harness/README.md": "8c3c27edb1781eca7cd6c482d505aba3641d1ccd9f6829a659e37548befd60ec",
+    "marketplace/harness/README.md": "7efc92dda59345c2b390e4669f595faa1fe3216fc76b9d760da33ba1b72afbff",
     "marketplace/harness/codex/git-attributed-setup.md": "1e215a8ff3f468e3aff69efc1b9b31bab0331d84042e06791d82b2037602243f",
     "marketplace/harness/copilot/git-attributed-setup.prompt.md": "fac1653ac857f6243c38519eaeb6b974b5a841256313e87cf13bef17f4ff4b6d",
     "marketplace/harness/cursor/git-attributed-setup.md": "37d4dede0ca38075debe3605ff34c9639987e7a6860c689cdfd507cfc0e6d63c",
@@ -17,12 +17,11 @@
     "marketplace/harness/grok/hooks.json": "c5272f68de45d632b1bee936d4c2d0497a890507a6432cc3116fae9736f1ce0e",
     "marketplace/harness/opencode/git-attributed-setup.md": "df678b3047c6c485657419d4b7532c6ba6c52bb8e4dbad03ce65278d32a31887",
     "marketplace/harness/opencode/git-attributed.ts": "c483c737589f19f259dbf35f6e9f85092cdd8c0b20916d45f90df689deb014c5",
-    "marketplace/harness/vscode/git-attributed-setup.prompt.md": "951b735413e9cc20ea6fef5e42a241078efbc282cffb1f2f9cda7a5cbbce8c81",
-    "marketplace/harness/vscode/hooks.json": "fe21ffe1ccea388052741e6af471dcdc5eb620a53747c7c6a9b56b0d7019e69d",
+    "marketplace/harness/vscode/git-attributed-setup.prompt.md": "eac3291deaddfba518b6f943e60def3245055472a8d0c9178b8acb613d9153e4",
     "marketplace/harness/windsurf/git-attributed-setup.md": "d8fd6f961815d9b55cdf1f2d0393ee5a7e852062accd60b5b2fce6f7331479be",
     "marketplace/harness/windsurf/hooks.json": "dc91a753c371f0c38abf5e6b937976780122a13b84a59b6cca071b0c40ece967"
   },
   "pkl": "0.33.0",
-  "sourceSha": "42f161387e45ef3dbcf44f4ea8a9cb7b720e1b0959518706e3bd0594629366df",
+  "sourceSha": "1be4d1e572fbf261a711c02ec1dc7ead670172342838e9d132734e25a8542c85",
   "version": 1
 }

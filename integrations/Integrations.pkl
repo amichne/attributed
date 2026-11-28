@@ -12,7 +12,8 @@ import "../tools/projection/Schema.pkl"
 local shell = "Bash|Shell|RunCommand|run_command|Execute|execute|execute_command|terminal|shell"
 
 // Claude Code, Factory, Codex, Copilot, and Devin hooks are written by
-// `git-attributed install-hooks --agent <agent>`, not projected here.
+// `git-attributed install-hooks --agent <agent>`, not projected here. VS
+// Code's agent runs Copilot's hooks, so it uses --agent copilot too.
 harnesses {
   new Schema.Cursor {
     editMatcher = "create_file|delete_file|edit_file|write_file|apply_patch|search_replace|Edit|Write"
@@ -26,11 +27,6 @@ harnesses {
   }
   new Schema.Grok {
     editMatcher = "Create|Edit|ApplyPatch|create_file|edit_file|write_file|apply_patch"
-    shellMatcher = shell
-    timeout = 30
-  }
-  new Schema.VSCode {
-    editMatcher = "create_file|replace_string_in_file|multi_replace_string_in_file|insert_edit_into_file|apply_patch"
     shellMatcher = shell
     timeout = 30
   }

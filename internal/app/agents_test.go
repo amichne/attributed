@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -106,6 +107,30 @@ func TestClaudeCheckpointIgnoresCopilotRunningItsHooks(t *testing.T) {
 		"checkpoint", "claude", "--type", "human", "--hook-input", "stdin")
 	if code != ExitSuccess || err != nil || stdout != "" || stderr != "" {
 		t.Fatalf("claude checkpoint = %d, %q, %q, %v; want a quiet skip", code, stdout, stderr, err)
+	}
+}
+
+func TestStatusWarnsAboutTheLegacyVSCodeHookFile(t *testing.T) {
+	t.Parallel()
+	root := appRepo(t)
+	appWrite(t, root, "file.txt", "base\n")
+	appCommit(t, root, "base")
+	if err := os.MkdirAll(filepath.Join(root, ".github", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appWrite(t, root, ".github/hooks/git-attributed-vscode.json",
+		`{"hooks":{"PreToolUse":[{"type":"command","command":"command -v git-attributed >/dev/null 2>&1 || exit 0; git-attributed checkpoint portable-vscode --type human --hook-input stdin # git-attributed-hook:vscode-pre-edit"}]}}`)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	code, _, stderr, err := appRun(root, now, nil, "status")
+	if code != ExitSuccess || err != nil || !strings.Contains(stderr, "install-hooks --agent copilot") {
+		t.Fatalf("status = %d, %q, %v; want the legacy VS Code warning", code, stderr, err)
+	}
+	if code, _, _, err := appRun(root, now, nil, "install-hooks", "--agent", "copilot"); code != ExitSuccess || err != nil {
+		t.Fatalf("install-hooks --agent copilot = %d, %v", code, err)
+	}
+	code, _, stderr, err = appRun(root, now, nil, "status")
+	if code != ExitSuccess || err != nil || strings.Contains(stderr, "git-attributed-vscode.json") {
+		t.Fatalf("status after migration = %d, %q, %v", code, stderr, err)
 	}
 }
 
