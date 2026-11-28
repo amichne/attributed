@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/amichne/attributed/compare/v0.1.0...v0.2.0) (2026-11-28)
+
+
+### Features
+
+* first-class Codex, Copilot, and Devin hooks ([#19](https://github.com/amichne/attributed/issues/19)) ([bc838b7](https://github.com/amichne/attributed/commit/bc838b7d4291d5cdebd9ede9bc2381419230f6c3))
+* version agent plugins with each release and point setup at Homebrew ([#17](https://github.com/amichne/attributed/issues/17)) ([357298d](https://github.com/amichne/attributed/commit/357298d02e8461c0db1695b8c0a7df214b787718))
+
+
+### Bug Fixes
+
+* replace the legacy VS Code hook file with the Copilot hooks ([#21](https://github.com/amichne/attributed/issues/21)) ([fb50530](https://github.com/amichne/attributed/commit/fb5053038422283ce5182f73b43d87f829a9bede))
+
 ## 0.1.0 (2026-11-27)
 
 

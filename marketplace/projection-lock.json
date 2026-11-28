@@ -1,8 +1,8 @@
 {
   "files": {
     "commands/git-attributed-setup.toml": "aa586807f70189f1e91adedd553e99b9e9e3673384e338ef1488282886ba6093",
-    "marketplace/git-attributed/.claude-plugin/plugin.json": "4d10f355feb86ac59fde8e43510f757177be87c3695635868edd711c0f4db804",
-    "marketplace/git-attributed/.factory-plugin/plugin.json": "4d10f355feb86ac59fde8e43510f757177be87c3695635868edd711c0f4db804",
+    "marketplace/git-attributed/.claude-plugin/plugin.json": "bd0997dd1ce7262d4cab6834699945fc74bd3a8a1f4db12bce42e5453e3c9c19",
+    "marketplace/git-attributed/.factory-plugin/plugin.json": "bd0997dd1ce7262d4cab6834699945fc74bd3a8a1f4db12bce42e5453e3c9c19",
     "marketplace/git-attributed/LICENSE": "5739e47ce8e4f54a80975ce5335ab2e56b078e2558d27eab6556650fe032c69a",
     "marketplace/git-attributed/README.md": "b86999f667fd14d353e271b98c7687873a9f490bf7419e7a04f7bcdc6aac9c70",
     "marketplace/git-attributed/commands/git-attributed-setup.md": "67ce14e0f0527ca333e31f80d497d872f95b5f43448f14e44acbb8a661a1b3ce",
@@ -22,6 +22,6 @@
     "marketplace/harness/windsurf/hooks.json": "dc91a753c371f0c38abf5e6b937976780122a13b84a59b6cca071b0c40ece967"
   },
   "pkl": "0.33.0",
-  "sourceSha": "1be4d1e572fbf261a711c02ec1dc7ead670172342838e9d132734e25a8542c85",
+  "sourceSha": "1e189cfd3839294aec484ccd6c099efb4f4d853e5e93e3f04e9f18898a3b440c",
   "version": 1
 }
